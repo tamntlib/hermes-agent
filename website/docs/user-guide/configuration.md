@@ -1097,7 +1097,52 @@ auxiliary:
     model: ""                                       # Empty = use main chat model. Override with e.g. "google/gemini-3-flash-preview" for cheaper/faster compression.
     provider: "auto"                                # Provider: "auto", "openrouter", "nous", "codex", "main", etc.
     base_url: null                                  # Custom OpenAI-compatible endpoint (overrides provider)
+    service_tier: null                              # Optional: priority (alias fast), ultrafast, or normal/off
 ```
+
+### Compression processing tier
+
+`auxiliary.compression.service_tier` selects a processing tier independently of the
+chat session's Fast/Normal setting:
+
+```yaml
+providers:
+  my-proxy:
+    base_url: https://proxy.example/v1
+    transport: codex_responses
+    key_env: MY_PROXY_API_KEY
+    service_tiers: [priority]
+
+auxiliary:
+  compression:
+    provider: custom:my-proxy
+    service_tier: priority  # fast is an alias for priority
+```
+
+Hermes sends the requested tier only when the **actual named provider route and
+model** explicitly declare it in `service_tiers`. A model's declaration replaces
+the provider list. An absent declaration, an empty list, an unsupported tier, or
+an unverified route identity leaves the request at the provider's default tier;
+it does not prevent compression. The exact provider identity, endpoint and API
+mode must match. A same-endpoint sibling provider cannot authorize the request.
+Priority/Ultrafast controls do not use the chat session's bounded `auto`/`cold`
+windows; those values are invalid here.
+
+The policy is evaluated again for credential retries and every fallback,
+including `auxiliary.compression.fallback_chain` and top-level
+`fallback_providers`. A fallback that does not declare the requested tier receives
+no processing-tier override. OpenAI-compatible Responses/Chat routes use
+`service_tier`; supported Anthropic Messages Priority routes use `speed: fast`
+and the Fast-mode beta. Anthropic Ultrafast is not supported.
+
+Omitting this key or setting it to `null` preserves existing raw `extra_body`
+behavior. Setting `normal`/`off` disables the managed tier. When a non-null policy
+is configured, it takes precedence over raw `service_tier`/`speed` overrides for
+compression while preserving unrelated request fields. To migrate from a forced
+`auxiliary.compression.extra_body.service_tier`, remove that raw field and set
+`auxiliary.compression.service_tier` instead. Other auxiliary tasks are unchanged.
+This setting controls Hermes's auxiliary summary request, not native
+`/responses/compact` or provider-managed compaction.
 
 :::info Legacy config migration
 Older configs with `compression.summary_model`, `compression.summary_provider`, and `compression.summary_base_url` are automatically migrated to `auxiliary.compression.*` on first load (config version 17). No manual action needed.
