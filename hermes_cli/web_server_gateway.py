@@ -475,6 +475,43 @@ def _action_targets_system_gateway(subcommand: list[str]) -> bool:
         reset_hermes_home_override(token)
 
 
+def _record_dashboard_updater(pid):
+    """Best-effort Linux identity only; never changes native update semantics."""
+    import json
+    import os
+    from pathlib import Path
+    import sys
+    import tempfile
+
+    temporary = None
+    try:
+        if sys.platform != "linux":
+            return
+        def identity(number):
+            text = Path(f"/proc/{number}/stat").read_text(encoding="utf-8-sig")
+            fields = text[text.rfind(")") + 2:].split()
+            return {"pid": number, "starttime": int(fields[19]), "sid": int(fields[3])}
+        record = identity(pid)
+        record["owner"] = identity(os.getpid())
+        record["cgroup"] = Path("/proc/self/cgroup").read_text(encoding="utf-8-sig").strip()
+        runtime = Path(os.environ["XDG_RUNTIME_DIR"])
+        fd, temporary = tempfile.mkstemp(prefix=".hermes-dashboard-updater-", dir=runtime)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(record, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, runtime / "hermes-dashboard-updater.json")
+    except Exception as exc:  # health: allow BLE001 -- registration is best-effort; never alter native update outcome
+        print(f"WARNING: updater identity unavailable; selective cleanup may be skipped: {exc}",
+              file=sys.stderr, flush=True)
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
 def _spawn_hermes_action(
     subcommand: list[str], name: str, *, env_overrides: Optional[dict[str, str]] = None
 ) -> subprocess.Popen:
@@ -551,6 +588,8 @@ def _spawn_hermes_action(
         log_file.write(f"{name}: spawn failed: {exc}\n".encode())
         log_file.close()
         raise
+    if name == "hermes-update":
+        _record_dashboard_updater(proc.pid)
     log_file.close()  # child holds its own dup'd fd; keeping ours leaks one per action
     _ACTION_RESULTS.pop(name, None)
     _ACTION_COMMANDS[name] = tuple(subcommand)
