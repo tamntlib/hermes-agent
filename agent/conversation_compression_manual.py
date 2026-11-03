@@ -70,6 +70,7 @@ def compress_now(
     agent: Any, history: Sequence[dict[str, Any]], request: CompressRequest, *,
     system_message: Any = None, task_id: str = "default", skip_without_window: bool = False,
     snapshot_is_current: Optional[Callable[[], bool]] = None,
+    force: bool = True,
 ) -> CompressResult:
     """Run one manual compression of ``history`` on ``agent`` and return the outcome; the caller installs
     ``after_messages`` (and re-anchors session ids) — history is never mutated here.
@@ -127,8 +128,9 @@ def compress_now(
         tail_rows.append(row)
     try:
         compressed, _ = agent._compress_context(
-            head, system_message, approx_tokens=before_tokens, focus_topic=request.focus_topic, force=True,
+            head, system_message, approx_tokens=before_tokens, focus_topic=request.focus_topic, force=force,
             defer_context_engine_notification=True, **({"task_id": task_id} if task_id != "default" else {}),
+            **({"trigger": "post_turn"} if not force else {}),
             **({"snapshot_is_current": snapshot_is_current} if snapshot_is_current is not None else {}),
             **({"verbatim_tail": tail_rows} if tail_rows else {}))
     except Exception:

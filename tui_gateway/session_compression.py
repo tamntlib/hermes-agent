@@ -262,6 +262,7 @@ def _manual_compress_turn(sid: str, session: dict):
 def _compress_session_history(
     session: dict, focus_topic: str | None = None, approx_tokens: int | None = None,
     before_messages: list | None = None, history_version: int | None = None,
+    *, automatic: bool = False,
 ) -> tuple[int, dict]:
     """Single choke point for all manual-compress routes. ``focus_topic`` is the RAW argument string after
     ``/compress``; the shared core (``agent.conversation_compression_manual``) parses boundary forms
@@ -290,7 +291,7 @@ def _compress_session_history(
 
     try:
         result = compress_now(agent, before_messages, request, task_id=session.get("session_key") or "default",
-                              snapshot_is_current=snapshot_is_current)
+                              snapshot_is_current=snapshot_is_current, **({"force": False} if automatic else {}))
     finally:
         _clear_session_context(tokens)
     if result.status == "preview":
@@ -300,6 +301,9 @@ def _compress_session_history(
         raise CompressionLockHeld(result.lock_holder)
     if result.status != "compressed":
         return 0, _get_usage(agent)
+    if automatic and result.after_messages == before_messages:
+        finalize_context_engine_compression_notification(agent, committed=False)
+        return 0, _get_usage(agent)
     with session["history_lock"]:
         if int(session.get("history_version", 0)) != history_version:
             # External mutation during compaction — drop the result so we don't clobber concurrent edits.
@@ -307,7 +311,44 @@ def _compress_session_history(
             return 0, _get_usage(agent)
         session["history"] = result.after_messages
         session["history_version"] = history_version + 1
+        if automatic:
+            agent._session_messages = session["history"]
     return result.removed, _get_usage(agent)
+
+
+def _emit_complete_and_compress(sid: str, session: dict, payload: dict) -> None:
+    """Deliver first, then reuse /compress while the turn still owns the session.
+
+    No detached job or extra persistence: the next prompt queues behind this turn.
+    Automatic failures must not turn an already delivered answer into a failed turn.
+    """
+    from agent.post_turn_compression import post_turn_compression_due
+    from agent.conversation_compression import finalize_context_engine_compression_notification
+
+    due = False
+    try:
+        if payload.get("status") == "complete":
+            due = post_turn_compression_due(session["agent"], session.get("history", []), _load_cfg())
+    except Exception:
+        logger.warning("Post-reply compression check failed for %s", sid, exc_info=True)
+    if due:
+        # Set before delivery: input arriving on message.complete must queue even
+        # before the existing compressor acquires its durable compression lock.
+        session["_manual_compress_active"] = True
+    try:
+        _emit("message.complete", sid, payload)
+        if due:
+            try:
+                _compress_session_history(session, automatic=True)
+                _sync_session_key_after_compress(sid, session, clear_pending_title=False)
+                finalize_context_engine_compression_notification(session["agent"], committed=True)
+                _emit_session_info_for_session(sid, session)
+            except Exception:
+                finalize_context_engine_compression_notification(session["agent"], committed=False)
+                logger.warning("Post-reply compression failed for %s", sid, exc_info=True)
+    finally:
+        if due:
+            session.pop("_manual_compress_active", None)
 
 
 def _sync_session_key_after_compress(

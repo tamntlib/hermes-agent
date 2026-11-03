@@ -29,7 +29,7 @@ def compress_request(payload):
     return request
 
 
-async def prepare_compress(authority, live, payload, prepared):
+async def prepare_compress(authority, live, payload, prepared, *, automatic=False):
     from gateway.session_policy import restore_policy, policy_scope
     from agent.context_compressor import ContextCompressor
     from agent.agent_init import _parse_config_int
@@ -42,6 +42,8 @@ async def prepare_compress(authority, live, payload, prepared):
     policy = restore_policy(snapshot['receipt']['policy'])
     config = policy.config(authority)
     options = config.get('compression') or {}
+    if automatic and (config.get('context') or {}).get('engine', 'compressor') not in (None, '', 'compressor'):
+        return {'status': 'noop'}  # External engines own their automatic compaction policy.
     if options.get('checkpoint_required'):
         raise RuntimeStoreError('compression_checkpoint_required')
     model, runtime = authority.runner._resolve_session_agent_runtime(source=live.source, session_key=live.route)
@@ -87,18 +89,52 @@ async def prepare_compress(authority, live, payload, prepared):
                         if resident is None:
                             _end_engine(engine, snapshot['target'], messages)
                         raise
-                compressor = ContextCompressor(model, base_url=runtime.get('base_url') or '',
-                    api_key=runtime.get('api_key') or '', provider=runtime.get('provider') or '',
-                    api_mode=runtime.get('api_mode') or '', quiet_mode=True, abort_on_summary_failure=True,
-                    protect_first_n=options.get('protect_first_n', 3), protect_last_n=options.get('protect_last_n', 20),
-                    min_tail_user_messages=max(1, _parse_config_int(options.get('min_tail_user_messages', 1), 1)),
-                    custom_providers=config.get('custom_providers'))
-                compressor.bind_session_state(session_db=authority.db, session_id=snapshot['target'])
-                compressed = compressor.compress(json.loads(json.dumps(head)), force=True,
-                                                   focus_topic=request.focus_topic, memory_context=memory_context)
+                token_options = {}
+                if automatic:
+                    from types import SimpleNamespace
+                    from agent.agent_init import _parse_compression_config, config_context_length_for_runtime, _compressor_max_tokens
+                    from agent.post_turn_compression import post_turn_compression_due
+                    from agent.usage_anchor import restore_usage_anchor
+                    from tools.mcp_tool_agent import pinned_tool_defs
+                    row = authority.db.get_session(snapshot['target'])
+                    probe = SimpleNamespace(model=model, provider=runtime.get('provider') or '',
+                        base_url=runtime.get('base_url') or '', api_mode=runtime.get('api_mode') or '',
+                        max_tokens=getattr(resident, 'max_tokens', None), session_id=snapshot['target'],
+                        _session_db=authority.db, _cached_system_prompt=row.get('system_prompt') or '',
+                        tools=pinned_tool_defs(json.loads(row.get('tool_names') or 'null')) or None)
+                    settings = _parse_compression_config(probe, config)
+                    compressor = ContextCompressor(model, threshold_percent=settings.threshold,
+                        base_url=probe.base_url, api_key=runtime.get('api_key') or '', provider=probe.provider,
+                        api_mode=probe.api_mode, quiet_mode=True, abort_on_summary_failure=True,
+                        config_context_length=config_context_length_for_runtime(probe, config),
+                        max_tokens=_compressor_max_tokens(probe), model_thresholds=settings.model_thresholds,
+                        threshold_tokens_cap=settings.threshold_tokens, summary_target_ratio=settings.target_ratio,
+                        protect_first_n=settings.protect_first, protect_last_n=settings.protect_last,
+                        min_tail_user_messages=settings.min_tail_users, tail_mode=settings.tail_mode,
+                        custom_providers=config.get('custom_providers'))
+                    compressor.bind_session_state(session_db=authority.db, session_id=snapshot['target'])
+                    probe.context_compressor = compressor
+                    probe.compression_enabled = settings.enabled
+                    probe.codex_responses_native_compaction = settings.codex_responses_native
+                    restore_usage_anchor(probe, messages)
+                    if not post_turn_compression_due(probe, messages, config) or compressor._automatic_compression_blocked():
+                        return None, compressor
+                    from agent.turn_context import _preflight_request_tokens
+                    token_options['current_tokens'] = _preflight_request_tokens(probe, messages, probe._cached_system_prompt)
+                else:
+                    compressor = ContextCompressor(model, base_url=runtime.get('base_url') or '',
+                        api_key=runtime.get('api_key') or '', provider=runtime.get('provider') or '',
+                        api_mode=runtime.get('api_mode') or '', quiet_mode=True, abort_on_summary_failure=True,
+                        protect_first_n=options.get('protect_first_n', 3), protect_last_n=options.get('protect_last_n', 20),
+                        min_tail_user_messages=max(1, _parse_config_int(options.get('min_tail_user_messages', 1), 1)),
+                        custom_providers=config.get('custom_providers'))
+                    compressor.bind_session_state(session_db=authority.db, session_id=snapshot['target'])
+                compressed = compressor.compress(json.loads(json.dumps(head)), force=not automatic,
+                                                   focus_topic=request.focus_topic, memory_context=memory_context,
+                                                   **token_options)
             finally:
                 reset_runtime_main(token)
-            if not any(m.get('_compressed_summary') for m in compressed):
+            if (automatic and compressed == head) or not any(m.get('_compressed_summary') for m in compressed):
                 return None, compressor
             return rejoin_compressed_head_and_tail(compressed, tail), compressor
     compressed, compressor = await asyncio.to_thread(summarize)
@@ -125,6 +161,7 @@ async def prepare_compress(authority, live, payload, prepared):
                                    _gateway_session_key=live.route,
                                    owned=resident is None and not isinstance(compressor, ContextCompressor))
     return dict(prepared, messages=compressed, summary=summary, post_compaction=hook, engine_owner=engine_owner,
+                compaction_reason='between_turns' if automatic else 'manual',
                 in_place=is_truthy_value(options.get('in_place'), default=True))
 
 
@@ -250,7 +287,7 @@ async def fire_post_compaction_hook(authority, prepared, result):
         async with _async_profile_runtime_scope(Path(authority.profile_id)):
             await asyncio.to_thread(
                 fire_post_compaction, session_id=target, old_session_id='' if previous == target else previous,
-                kind='summarize', reason='manual', **prepared['post_compaction'])
+                kind='summarize', reason=prepared.get('compaction_reason', 'manual'), **prepared['post_compaction'])
     except Exception:  # the compaction is committed; a plugin-side failure must not fail the reply
         logger.warning('post_compaction hook delivery failed', exc_info=True)
 

@@ -199,7 +199,7 @@ def _runtime_owns_authority(authority) -> bool:
 
 
 async def write_mutation(authority, ref, params, editor_servers, *, principal_id, authorize_write=None,
-                         commit_lock=None):
+                         commit_lock=None, automatic_compress=False):
     """The writer phase of ``session.mutate``, and of the admission-start editor MCP re-freeze
     (``refreeze_editor_mcp``): fenced prepare, the receipt commit, then its runtime projections.
     The caller authorized the change and holds the session's locks; this takes neither."""
@@ -244,7 +244,7 @@ async def write_mutation(authority, ref, params, editor_servers, *, principal_id
             from gateway.session_mutation_compress import prepare_compress
             from gateway.session_mutation_policy import PREPARE
             from gateway.session_local_mcp import prepare_editor_mcp
-            prepare = {'model': prepare_model, 'compress': prepare_compress, **PREPARE,
+            prepare = {'model': prepare_model, 'compress': partial(prepare_compress, automatic=automatic_compress), **PREPARE,
                        'editor_mcp': partial(prepare_editor_mcp, servers=editor_servers)}[operation]
             prepared = await prepare(authority, live, params['payload'], prepared)
             if prepared.get('status') in {'preview', 'noop', 'confirmation_required'}:

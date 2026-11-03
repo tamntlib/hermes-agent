@@ -574,6 +574,7 @@ DEFAULT_CONFIG = {
         # are floored at 0.75 (raise-only) so compaction doesn't fire with half the window free; set
         # above 0.75 to override the floor.
         "threshold": 0.50,
+        "threshold_buffer": 0.02,  # Post-reply window fraction (0.90 - 0.02 = 0.88); null disables.
         # threshold_tokens: optional absolute token cap — when set, compression triggers at the
         # lower of the ratio threshold and this count. Clamped to the model's context length.
         # Off by default: no single count suits windows from 64K to 1M+, so the ratio decides.
