@@ -1067,19 +1067,16 @@ class TestBackgroundOwnershipPolicyConsistency:
 
     def test_adoption_lifts_the_autonomous_delete_refusal(self, tmp_path, monkeypatch):
         """Adoption is the documented path from refused to allowed for archival."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
-        with _skill_dir(tmp_path):
-            _create_skill("adopt-me", VALID_SKILL_CONTENT)
-            with patch("tools.skill_usage.load_usage", return_value={}):
-                before = self._bg_delete("adopt-me")
-            with patch(
-                "tools.skill_usage.load_usage",
-                return_value={"adopt-me": {"created_by": "agent"}},
-            ), patch(
-                "tools.skill_usage.get_record",
-                side_effect=lambda n: {"created_by": "agent", "pinned": False},
-            ):
-                after = self._bg_delete("adopt-me")
+        from tools.skill_usage import mark_agent_created
+
+        home = tmp_path / ".hermes"
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        with _skill_dir(home / "skills"):
+            _create_skill("adopt-me", _skill_content("adopt-me"))
+            before = self._bg_delete("adopt-me")
+            # Persist canonical management metadata, as the real adopt command does.
+            mark_agent_created("adopt-me")
+            after = self._bg_delete("adopt-me")
 
         assert "not curator-managed" in before["error"]
         assert "curator-managed" not in after.get("error", ""), after
@@ -1272,7 +1269,7 @@ class TestCuratorConsolidationDeleteGuard:
 
     def test_bare_prune_during_curator_pass_refused(self, tmp_path, monkeypatch):
         with _curator_pass(tmp_path, monkeypatch=monkeypatch) as skills_root:
-            _create_curator_skill("active-skill", VALID_SKILL_CONTENT)
+            _create_curator_skill("active-skill", _skill_content("active-skill"))
             result = _delete_skill("active-skill", absorbed_into="")
         assert result["success"] is False
         assert result.get("_fail_closed") is True
@@ -1415,6 +1412,8 @@ class TestLockedGuard:
         from tools.skill_manager_tool import _write_file
         assert _create_skill(name, VALID_SKILL_CONTENT, category)["success"]
         assert _write_file(name, "references/notes.md", "# Notes\n\nKeep this.\n")["success"]
+        from tools.skill_usage import adopt_skill
+        assert adopt_skill("test-skill")[0]  # fixture frontmatter is canonical; lock stays directory-keyed
         return skills / (f"{category}/{name}" if category else name)
 
     @staticmethod

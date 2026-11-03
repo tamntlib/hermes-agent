@@ -8,7 +8,7 @@ import logging
 import threading
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 logger = logging.getLogger("tools.skill_manager_tool")
 
@@ -162,12 +162,23 @@ def _pinned_guard(name: str) -> Optional[str]:
 
 
 def _background_review_delete_guard(name: str, skill_dir: Path) -> Optional[dict[str, Any]]:
-    """Refuse autonomous deletes of anything but curator-owned sediment. Content writes are not
-    gated by ownership: the review fork exists to improve every skill it learns from, and every
-    write is ledgered and reversible, while an archive removes a skill the user relies on."""
+    """Keep the upstream delete entry point under the deployment's ownership policy."""
+    return _background_review_write_guard(name, skill_dir, "delete")
+
+
+def _background_review_write_guard(
+    name: str, skill_dir: Path, action: str) -> Optional[dict[str, Any]]:
+    """Preserve pre-update autonomous write protection for pinned/imported/user-owned skills."""
     if not _is_background_review():
         return None
-    refuse = "Refusing background curator delete for"
+    refuse = f"Refusing background curator {action} for"
+    try:
+        name, route = _load_local_skill_policy().classify_root({"path": skill_dir})
+    except Exception:  # health: allow BLE001 -- unresolved policy/metadata must refuse autonomous mutation without exposing parser payloads
+        logger.warning("Background skill classification unavailable; refusing autonomous write")
+        return _refusal(
+            f"{refuse} skill '{name}': not curator-managed or source provenance/ownership "
+            "could not be verified safely.")
     if _is_pinned(name, "pinned skill guard"):
         return _refusal(
             f"{refuse} pinned skill '{name}': pinned skills "
@@ -198,14 +209,32 @@ def _background_review_delete_guard(name: str, skill_dir: Path) -> Optional[dict
                        else "no usage record")
             return _refusal(
                 f"{refuse} skill '{name}': the skill is not "
-                f"curator-managed ({_detail}). Only curator-managed skills may be archived "
-                f"autonomously. Run `hermes curator adopt {name}` to opt it in.")
+                f"curator-managed ({_detail}). User-owned skills are off-limits to autonomous "
+                f"curation. Run `hermes curator adopt {name}` to opt it in.")
     except Exception:
         logger.warning("owned skill guard lookup failed for %s", name, exc_info=True)
         return _refusal(
             f"{refuse} skill '{name}': agent ownership could not "
             f"be verified because the provenance record is unavailable or unreadable.")
+    if route != "root":
+        return _refusal(f"{refuse} skill '{name}': protected or not writable; use a verified extension instead.")
     return None
+
+
+def _load_local_skill_policy():
+    """Load the private checkout policy lazily; callers fail closed."""
+    from tools import local_skill_policy
+    return local_skill_policy
+
+
+def _background_review_extension_root_guard(name: str, action: str = "create") -> Optional[dict[str, Any]]:
+    if not _is_background_review():
+        return None
+    try:
+        return _load_local_skill_policy().extension_root_guard(name, action)
+    except Exception:
+        logger.error("Required local skill policy unavailable; refusing background write", exc_info=True)
+        return _refusal("Required local skill policy unavailable; refusing background write.")
 
 
 def _background_review_read_before_write_guard(
@@ -256,11 +285,17 @@ def _background_review_preflight(action: str, name: str) -> Optional[dict[str, A
     batch path: the content lock (every mutating action) and the ownership delete guard."""
     if (locked := _locked_guard(name, action)) is not None:
         return locked
-    if action != "delete":
+    if action in {"create", "edit", "patch", "write_file"}:
+        if (refusal := _background_review_extension_root_guard(name, action)) is not None:
+            return refusal
+    if action not in {"edit", "patch", "delete", "write_file", "remove_file"}:
         return None
     from tools import skill_manager_tool as _smt
     existing = _smt._find_skill(name)
-    return _background_review_delete_guard(name, existing["path"]) if existing else None
+    if not existing:
+        return None
+    return (_background_review_delete_guard(name, existing["path"]) if action == "delete" else
+            _background_review_write_guard(name, existing["path"], action))
 
 
 def _curator_consolidation_delete_guard(
