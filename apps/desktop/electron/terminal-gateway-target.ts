@@ -2,12 +2,10 @@
 // on; this resolves that record against the registry and the live SSH pool so
 // the PTY spawns on THAT host no matter which gateway the window shows later.
 import { backendScopeKey, type ConnectionRegistry, LOCAL_CONNECTION_ID } from './connection-registry'
+import { resolveTerminalTarget, type TerminalTarget } from './terminal-target'
 import { type RegistrySshPoolEntry, registrySshPoolScopeByConnectionId } from './window-connection-route'
 
-export interface SshTerminalTarget {
-  scope: string
-  ssh: unknown
-}
+export type SshTerminalTarget = Exclude<TerminalTarget, null | 'pending'>
 
 /** `missing`: the gateway was removed. `no-shell`: a URL/token or cloud
  *  gateway, which has no shell transport; never answered with a local shell
@@ -38,6 +36,16 @@ export function terminalGatewayTarget(
 
   if (source.kind === 'local') {
     return 'local'
+  }
+
+  if (source.kind === 'remote' && (source.sshTunnel || source.sshTunnelError)) {
+    return resolveTerminalTarget({
+      registry,
+      windowRoute: { connectionId: id, profile: owner.profile || 'default', registryScoped: true },
+      legacyRoute: () => null,
+      profile: owner.profile || 'default',
+      managedTarget: () => null
+    }) || 'no-shell'
   }
 
   if (source.kind !== 'ssh') {

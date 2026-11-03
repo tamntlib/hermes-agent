@@ -39,6 +39,73 @@ import {
   normAuthMode
 } from './connection-config'
 import { matchingConnectionId, type StoredRoute } from './connection-route-identity'
+import { validateKeyPath, validateSshTarget } from './ssh-connection'
+
+export interface SshTunnelConfig {
+  remotePort: number
+  host: string
+  user?: string
+  port?: number
+  keyPath?: string
+}
+
+export function normalizeSshTunnel(value: unknown, gatewayUrl: unknown): SshTunnelConfig {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Invalid SSH tunnel configuration.')
+  }
+
+  const input = value as Record<string, unknown>
+
+  if (Object.keys(input).some(key => !['host', 'user', 'port', 'keyPath', 'remotePort'].includes(key))) {
+    throw new Error('Invalid SSH tunnel configuration field.')
+  }
+
+  if (
+    typeof input.host !== 'string' ||
+    ['user', 'keyPath'].some(key => input[key] != null && typeof input[key] !== 'string')
+  ) {
+    throw new Error('Invalid SSH tunnel configuration.')
+  }
+
+  // Legacy remotePort is compatibility input only; the Gateway URL owns routing.
+  const backend = new URL(normalizeRemoteBaseUrl(gatewayUrl))
+  const remotePort = Number(backend.port || (backend.protocol === 'https:' ? 443 : 80))
+
+  if (remotePort < 1 || remotePort > 65535) {
+    throw new Error('Invalid remote backend port (must be an integer from 1 to 65535).')
+  }
+
+  const rawPort = input.port == null ? '' : String(input.port)
+  const hostPort = /(?:\]|^[^:]+):(\d+)$/.exec(input.host.trim())?.[1]
+
+  if (input.port != null && !rawPort) {
+    throw new Error('Invalid SSH port.')
+  }
+
+  for (const port of [rawPort, hostPort]) {
+    if (port && (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535)) {
+      throw new Error('Invalid SSH port.')
+    }
+  }
+
+  const ssh = normalizeSshConfig({ ...input, mode: 'ssh' })
+
+  if (!ssh) {
+    throw new Error('SSH host is required.')
+  }
+
+  validateSshTarget(ssh.host, ssh.user || '', ssh.port ?? 22)
+  validateKeyPath(ssh.keyPath)
+  const { host, user, port, keyPath } = ssh
+
+  return {
+    remotePort,
+    host,
+    ...(user ? { user } : {}),
+    ...(port ? { port } : {}),
+    ...(keyPath ? { keyPath } : {})
+  }
+}
 
 export const REGISTRY_VERSION = 2
 
@@ -54,6 +121,8 @@ export interface RegistryConnection {
   kind: ConnectionKind
   /** Required, unique (case-insensitive) display name — the "device name". */
   label: string
+  sshTunnel?: SshTunnelConfig
+  sshTunnelError?: string
   /** remote/cloud: normalized base URL. */
   url?: string
   /** remote/cloud: 'token' | 'oauth'. */
@@ -586,6 +655,21 @@ export function registryDialConnectionId(connectionId: unknown, primary: unknown
   return id
 }
 
+export function registryDialSource(registry: ConnectionRegistry, connectionId: unknown): RegistryConnection {
+  const id = registryDialConnectionId(connectionId, registry.primary)
+  const source = registry.connections.find(connection => connection.id === id)
+
+  if (!source) {
+    throw new Error(`No connection with id "${id}".`)
+  }
+
+  if (source.sshTunnelError) {
+    throw new Error(source.sshTunnelError)
+  }
+
+  return source
+}
+
 /**
  * Whether the roster enumeration should SKIP the registry's local entry as
  * connect-on-demand. True when the local source is the forced-local route
@@ -966,6 +1050,7 @@ export interface ConnectionInput {
   id?: string
   kind: ConnectionKind
   label: string
+  sshTunnel?: (Omit<SshTunnelConfig, 'remotePort'> & { remotePort?: number }) | null
   url?: string
   authMode?: string
   token?: unknown
@@ -999,6 +1084,10 @@ function storedAuthMode(kind: ConnectionKind, authMode: unknown, token: unknown)
 }
 
 export function normalizeConnectionInput(input: ConnectionInput, registry: ConnectionRegistry): RegistryConnection {
+  if (input.kind !== 'remote' && input.sshTunnel != null) {
+    throw new Error('SSH tunnel is only available for Remote Gateway connections.')
+  }
+
   const label = String(input.label || '').trim()
 
   if (!label) {
@@ -1101,6 +1190,10 @@ export function normalizeConnectionInput(input: ConnectionInput, registry: Conne
     const authMode = storedAuthMode(kind, input.authMode, undefined)
     const entry: RegistryConnection = { id, kind, label, url, authMode }
 
+    if (kind === 'remote' && input.sshTunnel != null) {
+      entry.sshTunnel = normalizeSshTunnel(input.sshTunnel, url)
+    }
+
     // A token is only meaningful for token-auth remotes. Dropping it here is
     // what clears the stale envelope when an entry is switched token→oauth
     // (or is a cloud entry, which authenticates via the portal session) —
@@ -1153,6 +1246,10 @@ export function mergeConnectionInput(input: ConnectionInput, existing?: null | R
     return input
   }
 
+  if (existing.sshTunnelError && input.sshTunnel === undefined) {
+    throw new Error(existing.sshTunnelError)
+  }
+
   const merged: ConnectionInput = { ...input }
 
   const inherit = (field: keyof ConnectionInput & keyof RegistryConnection) => {
@@ -1180,6 +1277,7 @@ export function mergeConnectionInput(input: ConnectionInput, existing?: null | R
   // field keeps the stored set; an explicit payload (even {}) is
   // authoritative so the editor can clear them.
   inherit('headers')
+  inherit('sshTunnel')
 
   // ssh user/port: the editor shows ONE composite host field (user@host:port),
   // and normalizeSshConfig gives explicit user/port fields precedence over the
@@ -1224,6 +1322,10 @@ export function connectionDialFieldsChanged(before: RegistryConnection, after: R
     if ((before[field] ?? null) !== (after[field] ?? null)) {
       return true
     }
+  }
+
+  if (JSON.stringify(before.sshTunnel ?? null) !== JSON.stringify(after.sshTunnel ?? null)) {
+    return true
   }
 
   // Token envelopes are opaque here (main.ts encrypts). An edit that carries
@@ -1339,6 +1441,25 @@ export function normalizeRegistry(raw: unknown): ConnectionRegistry {
 
       const clean: RegistryConnection = { id, kind, label }
 
+      const rawTunnel = entry.sshTunnel ?? entry.terminalSsh
+
+      if (rawTunnel != null || entry.sshTunnelError || entry.terminalSshError) {
+        try {
+          if (kind !== 'remote') {
+            throw new Error('Invalid SSH tunnel connection kind.')
+          }
+
+          if ((entry.sshTunnelError || entry.terminalSshError) && rawTunnel == null) {
+            throw new Error('Invalid stored SSH tunnel.')
+          }
+
+          clean.sshTunnel = normalizeSshTunnel(rawTunnel, entry.url)
+        } catch {
+          quarantine('entry-invalid-ssh-tunnel', safeEntryCopy(item))
+          clean.sshTunnelError = 'Invalid SSH tunnel configuration. Update it in Connections.'
+        }
+      }
+
       if (kind === 'remote' || kind === 'cloud') {
         const url = String(entry.url || '').trim()
 
@@ -1397,6 +1518,31 @@ export function normalizeRegistry(raw: unknown): ConnectionRegistry {
     } catch {
       quarantine('entry-normalization-failed', safeEntryCopy(item))
     }
+  }
+
+  // A quarantined SSH route retains an addressable blocked identity. Otherwise
+  // a corrupt primary could silently become local, or a legacy URL could dial
+  // directly after the tunnel-bearing entry disappeared during normalization.
+  for (const item of rawConnections) {
+    if (!item || typeof item !== 'object') {continue}
+    const entry = item as Record<string, unknown>
+
+    if (entry.sshTunnel == null && entry.terminalSsh == null && !entry.sshTunnelError && !entry.terminalSshError)
+      {continue}
+
+    const id = typeof entry.id === 'string' ? entry.id.trim() : ''
+
+    if (!id || connections.some(connection => connection.id === id)) {continue}
+    connections.push({
+      id,
+      kind: 'remote',
+      label: uniqueLabel(
+        String(entry.label || 'Invalid SSH Gateway'),
+        connections.map(connection => connection.label)
+      ),
+      url: typeof entry.url === 'string' ? entry.url : undefined,
+      sshTunnelError: 'Invalid SSH tunnel connection. Update it in Connections.'
+    })
   }
 
   if (!connections.some(c => c.kind === 'local')) {
@@ -1666,6 +1812,10 @@ export function reconcileAppliedGlobalConnection(
     }
   })
 
+  if (existing?.sshTunnelError) {
+    throw new Error(existing.sshTunnelError)
+  }
+
   const kind: ConnectionKind = mode === 'cloud' ? 'cloud' : 'remote'
 
   const hostLabel = hostLabelFromBaseUrl(url) || (kind === 'cloud' ? 'Hermes Cloud' : 'Remote gateway')
@@ -1689,7 +1839,8 @@ export function reconcileAppliedGlobalConnection(
       token: block.token,
       headers: block.headers,
       org: block.org,
-      name
+      name,
+      sshTunnel: existing?.kind === 'remote' ? existing.sshTunnel : undefined
     },
     registry
   )

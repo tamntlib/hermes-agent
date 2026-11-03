@@ -102,7 +102,7 @@ describe('resolveSpeakStreamUrl', () => {
     expect(url).not.toContain('profile=mara')
   })
 
-  it('falls back to the plain connection descriptor when the *For bridges are absent (older main)', async () => {
+  it('fails closed when a qualified source has no *For bridges', async () => {
     setApiRequestConnection('gw-tailscale')
     setApiRequestProfile('research')
     Object.defineProperty(window, 'hermesDesktop', {
@@ -112,10 +112,9 @@ describe('resolveSpeakStreamUrl', () => {
 
     const url = await resolveSpeakStreamUrl()
 
-    // Best available answer without the bridges: the profile-scoped pool
-    // descriptor's own wsUrl (no cross-scope re-mint).
-    expect(url).toContain('/api/audio/speak-stream')
-    expect(getConnection).toHaveBeenCalledWith('research')
+    expect(url).toBeNull()
+    expect(getConnection).not.toHaveBeenCalled()
+    expect(getGatewayWsUrl).not.toHaveBeenCalled()
   })
 
   it('resolves to null instead of hanging forever when getConnection() wedges (#93454)', async () => {

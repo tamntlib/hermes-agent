@@ -7,17 +7,22 @@ import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 
 import { bindTerminalDefaultGateway, forgetRemovedTerminalGateways, type TerminalEntry } from './terminals'
 
-/** The gateway a terminal tab was opened on. Only This device and SSH gateways
- *  carry a shell; the SSH tunnel is keyed by (connection, profile). */
+/** The gateway a terminal tab was opened on. SSH-backed shells retain their
+ *  gateway and profile independently of the current Sessions selection. */
 export interface TerminalGateway {
   connectionId: string
   profile?: string
 }
 
-/** Where a shell for `connectionId` runs: an SSH gateway runs it on its own
- *  host; This device, URL/token and cloud gateways (no shell transport) run it
- *  here and say so. Undefined while the registry is unknown (or on a host with
- *  none, like the Webapp), so main keeps routing by the window. */
+/** Keep SSH intent so invalid tunnel configuration reaches Electron's error path, never a local shell. */
+const usesSshShell = (connection: DesktopRegistryConnection): boolean =>
+  connection.kind === 'ssh' ||
+  (connection.kind === 'remote' && Boolean(connection.sshTunnel || connection.sshTunnelError))
+
+/** Where a shell for `connectionId` runs: SSH-backed gateways keep their own
+ *  host; This device, URL/token and cloud gateways without SSH run it here.
+ *  Undefined while the registry is unknown (or on a host with none, like the
+ *  Webapp), so main keeps routing by the window. */
 export function shellGatewayFor(
   connectionId: null | string | undefined,
   profile: null | string | undefined,
@@ -29,7 +34,7 @@ export function shellGatewayFor(
     return undefined
   }
 
-  return source.kind === 'ssh'
+  return usesSshShell(source)
     ? { connectionId: source.id, profile: normalizeProfileKey(profile) }
     : { connectionId: LOCAL_CONNECTION_ID }
 }
@@ -42,8 +47,7 @@ const $defaultTerminalGateway = computed(
 
 export const defaultTerminalGateway = () => $defaultTerminalGateway.get()
 
-/** The tab's shell rides an SSH gateway's tunnel (only SSH gateways keep a
- *  connection id other than This device on a tab). */
+/** SSH-backed tabs keep their gateway identity rather than This device. */
 export const runsOverSsh = (gateway: TerminalGateway | undefined): boolean =>
   Boolean(gateway && gateway.connectionId !== LOCAL_CONNECTION_ID)
 
@@ -61,11 +65,13 @@ $connectionsRegistry.subscribe(registry => {
 })
 
 export const terminalGatewayOf = (term: TerminalEntry | undefined): TerminalGateway | undefined =>
-  term?.connectionId ? { connectionId: term.connectionId, ...(term.profile ? { profile: term.profile } : {}) } : undefined
+  term?.connectionId
+    ? { connectionId: term.connectionId, ...(term.profile ? { profile: term.profile } : {}) }
+    : undefined
 
 /** SSH gateways a terminal can be opened on, beside This device. */
 export const $terminalShellGateways = computed($connectionsRegistry, registry =>
-  (registry?.connections ?? []).filter(connection => connection.kind === 'ssh')
+  (registry?.connections ?? []).filter(usesSshShell)
 )
 
 export const $localGateway = computed(

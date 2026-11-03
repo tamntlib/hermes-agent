@@ -1416,6 +1416,7 @@ export {
   DEFAULT_CONNECT_TIMEOUT_MS,
   DEFAULT_EXEC_TIMEOUT_MS,
   DEFAULT_FORWARD_TIMEOUT_MS,
+  defaultControlDir,
   forwardSpec,
   hostArgs,
   pickLocalPort,

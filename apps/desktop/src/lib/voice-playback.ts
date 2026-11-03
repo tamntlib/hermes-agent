@@ -156,6 +156,10 @@ export async function resolveSpeakStreamUrl(owner?: OwnerScope): Promise<null | 
       )
     }
 
+    if (connectionId && (!desktop.getConnectionFor || !desktop.getGatewayWsUrlFor)) {
+      throw new Error('The selected Gateway voice bridge is unavailable.')
+    }
+
     // Both awaits below are IPC round-trips into the main process with no
     // timeout of their own (#93454) — a wedged main-process round-trip
     // otherwise hangs voice mode's "speaking" state forever instead of
@@ -188,6 +192,10 @@ export async function resolveSpeakStreamUrl(owner?: OwnerScope): Promise<null | 
     )
 
     const url = new URL(wsUrl)
+
+    if (conn.sshTunnelGeneration && new URL(conn.baseUrl).host !== url.host) {
+      throw new Error('SSH Gateway changed while opening voice.')
+    }
 
     if (!url.pathname.endsWith('/api/ws')) {
       return null

@@ -24,12 +24,15 @@ vi.mock('./ssh-connection', async importOriginal => ({
 import type { ConnectionRegistry } from './connection-registry'
 import { terminalGatewayTarget } from './terminal-gateway-target'
 import { registerTerminalIpc } from './terminal-ipc'
+import type { TerminalTarget } from './terminal-target'
 
 const registry = {
   connections: [
     { id: 'local', kind: 'local', label: 'This device' },
     { id: 'nas', kind: 'ssh', label: 'NAS' },
-    { id: 'cloudbox', kind: 'remote', label: 'Cloud box' }
+    { id: 'cloudbox', kind: 'remote', label: 'Cloud box' },
+    { id: 'vps', kind: 'remote', label: 'VPS', url: 'https://gateway.example', sshTunnel: { host: 'vps.example' } },
+    { id: 'invalid', kind: 'remote', label: 'Invalid', sshTunnelError: 'Invalid SSH tunnel' }
   ],
   primary: 'local',
   version: 2
@@ -72,13 +75,14 @@ function fakePty() {
 }
 
 /** Register the IPC with the window route pointing at `windowTarget`. */
-function register(windowTarget: unknown) {
+function register(windowTarget: TerminalTarget) {
   const pool = new Map([['conn:nas::default', nasTunnel]])
+  const ensureBackend = vi.fn(async () => undefined)
 
   const api = registerTerminalIpc({
     activeSshTerminalTarget: () => windowTarget,
-    ensureBackend: async () => undefined,
-    ensureGatewayBackend: async () => undefined,
+    ensureBackend,
+    ensureGatewayBackend: ensureBackend,
     findOnPath: () => null,
     gatewayTarget: owner => terminalGatewayTarget(owner, registry, pool),
     getSshConnectionState: scope => pool.get(scope),
@@ -87,7 +91,7 @@ function register(windowTarget: unknown) {
     sshBinary: () => '/usr/bin/ssh'
   })
 
-  return { api, start: handles.map.get('hermes:terminal:start') as Start }
+  return { api, ensureBackend, start: handles.map.get('hermes:terminal:start') as Start }
 }
 
 async function spawnFor(start: Start, payload: Record<string, unknown>) {
@@ -113,6 +117,27 @@ test('a tab runs on the gateway it recorded, not the one the window shows', asyn
 
   assert.notEqual(local.argv?.[0], '/usr/bin/ssh')
   assert.equal(local.session.connectionId, 'local')
+})
+
+test('a recorded tunneled Remote Gateway opens its independent SSH shell without backend bootstrap', async () => {
+  const { ensureBackend, start } = register(null)
+  const result = await spawnFor(start, { connectionId: 'vps', profile: 'work' })
+
+  assert.equal(result.argv?.[0], '/usr/bin/ssh')
+  assert.equal(result.argv?.[1].at(-1), 'ssh-to-vps.example')
+  assert.ok(result.argv?.[1].includes('ControlMaster=no'))
+  assert.ok(result.argv?.[1].includes('ClearAllForwardings=yes'))
+  assert.equal(result.session.connectionId, 'vps')
+  assert.equal(result.session.shell, 'ssh')
+  assert.equal(ensureBackend.mock.calls.length, 0)
+})
+
+test('an invalid recorded SSH tunnel rejects before any shell or backend bootstrap', async () => {
+  const { ensureBackend, start } = register(null)
+
+  await assert.rejects(spawnFor(start, { connectionId: 'invalid', profile: 'work' }), /Invalid SSH tunnel/)
+  assert.equal(spawnMock.fn.mock.calls.length, 0)
+  assert.equal(ensureBackend.mock.calls.length, 0)
 })
 
 test('a removed or shell-less gateway is reported, never answered with a local shell', async () => {

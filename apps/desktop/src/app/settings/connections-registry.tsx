@@ -41,6 +41,9 @@ interface EditorState {
   label: string
   host: string
   keyPath: string
+  sshTunnelEnabled: boolean
+  sshTunnelHost: string
+  sshTunnelKeyPath: string
   remoteHermesPath: string
   // ssh remote profile, hydrated on edit so the duplicate key matches the
   // main-process one (user@host:port + profile); the editor doesn't expose it.
@@ -65,6 +68,11 @@ function editorFromConnection(conn: DesktopRegistryConnection): EditorState {
     // would silently resurrect the old values.
     host: conn.host ? `${conn.user ? `${conn.user}@` : ''}${conn.host}${conn.port ? `:${conn.port}` : ''}` : '',
     keyPath: conn.keyPath || '',
+    sshTunnelEnabled: Boolean(conn.sshTunnel || conn.sshTunnelError),
+    sshTunnelHost: conn.sshTunnel
+      ? `${conn.sshTunnel.user ? `${conn.sshTunnel.user}@` : ''}${conn.sshTunnel.host.includes(':') ? `[${conn.sshTunnel.host}]` : conn.sshTunnel.host}${conn.sshTunnel.port ? `:${conn.sshTunnel.port}` : ''}`
+      : '',
+    sshTunnelKeyPath: conn.sshTunnel?.keyPath || '',
     remoteHermesPath: conn.remoteHermesPath || '',
     remoteProfile: conn.remoteProfile || '',
     headers: (conn.headerNames || []).map(name => ({ name, stored: true, value: '' }))
@@ -78,6 +86,9 @@ function emptyEditor(kind: DesktopConnectionKind): EditorState {
     label: '',
     host: '',
     keyPath: '',
+    sshTunnelEnabled: false,
+    sshTunnelHost: '',
+    sshTunnelKeyPath: '',
     remoteHermesPath: '',
     remoteProfile: '',
     headers: []
@@ -239,8 +250,8 @@ export function ConnectionsRegistrySection() {
   const [dupeError, setDupeError] = useState<null | string>(null)
 
   // The draft's auth mode lives inside the remote-setup state below; the
-  // sign-in identity callback runs at login time (after that state exists),
-  // so it reads the mode through this ref rather than the render-time closure.
+  // identity callback also runs during render, before this hook returns,
+  // so it reads the mode through this ref rather than the hook result.
   const remoteAuthModeRef = useRef<'oauth' | 'token'>('token')
 
   const remote = useRemoteSetup({
@@ -258,7 +269,21 @@ export function ConnectionsRegistrySection() {
       connectionId: editor?.id ?? null,
       label: editor?.label ?? '',
       kind: editor?.kind,
-      authMode: editor?.kind === 'cloud' ? 'oauth' : remoteAuthModeRef.current
+      authMode: editor?.kind === 'cloud' ? 'oauth' : remoteAuthModeRef.current,
+      ...(editor?.kind === 'remote' &&
+      (editor.sshTunnelEnabled ||
+        registry?.connections.some(
+          connection => connection.id === editor.id && (connection.sshTunnel || connection.sshTunnelError)
+        ))
+        ? {
+            sshTunnel: editor.sshTunnelEnabled
+              ? {
+                  host: editor.sshTunnelHost,
+                  keyPath: editor.sshTunnelKeyPath
+                }
+              : null
+          }
+        : {})
     }),
     onOAuthLoginSettled: settledId => {
       setEditor(prev => (prev && !prev.id ? { ...prev, id: settledId } : prev))
@@ -299,6 +324,7 @@ export function ConnectionsRegistrySection() {
   }, [load])
 
   const openEditor = (next: EditorState | null, saved?: DesktopRegistryConnection): void => {
+    void window.hermesDesktop?.cancelConnectionDraft?.()
     setDupeError(null)
     remote.reset({
       url: saved?.url || '',
@@ -346,6 +372,15 @@ export function ConnectionsRegistrySection() {
         }
 
         if (editor.kind === 'remote' || editor.kind === 'cloud') {
+          if (editor.kind === 'remote') {
+            payload.sshTunnel = editor.sshTunnelEnabled
+              ? {
+                  host: editor.sshTunnelHost,
+                  keyPath: editor.sshTunnelKeyPath
+                }
+              : null
+          }
+
           payload.url = remote.payload.remoteUrl
           payload.authMode = editor.kind === 'cloud' ? 'oauth' : remote.credentials.authMode
 
@@ -379,6 +414,7 @@ export function ConnectionsRegistrySection() {
 
         const result = await bridge.save(payload)
         publishRegistry(result.registry)
+        void window.hermesDesktop?.cancelConnectionDraft?.()
         setEditor(null)
         setPlainTextConfirm(false)
       } catch (err) {
@@ -829,6 +865,41 @@ export function ConnectionsRegistrySection() {
                 </Button>
               </div>
             </div>
+          )}
+
+          {editor.kind === 'remote' && (
+            <>
+              <ToggleRow
+                checked={editor.sshTunnelEnabled}
+                description={s.sshTunnelDesc}
+                label={s.sshTunnelTitle}
+                onChange={enabled => setEditor({ ...editor, sshTunnelEnabled: enabled })}
+              />
+              {editor.sshTunnelEnabled && (
+                <>
+                  <ListRow
+                    action={
+                      <Input
+                        onChange={e => setEditor({ ...editor, sshTunnelHost: e.target.value })}
+                        placeholder="user@host:22"
+                        value={editor.sshTunnelHost}
+                      />
+                    }
+                    title={s.sshTunnelHost}
+                  />
+                  <ListRow
+                    action={
+                      <Input
+                        onChange={e => setEditor({ ...editor, sshTunnelKeyPath: e.target.value })}
+                        value={editor.sshTunnelKeyPath}
+                      />
+                    }
+                    title={s.sshTunnelKey}
+                  />
+                  <p className="text-xs text-muted-foreground">{s.sshTunnelDestination}</p>
+                </>
+              )}
+            </>
           )}
 
           {editor.kind === 'ssh' && (

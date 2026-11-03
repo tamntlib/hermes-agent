@@ -70,6 +70,72 @@ afterEach(() => {
 })
 
 describe('ConnectionsRegistrySection', () => {
+  it('explicitly disables an error-only tunnel for the current URL probe and sign-in', async () => {
+    const withError: DesktopConnectionsRegistry = {
+      ...registry,
+      connections: [
+        registry.connections[0],
+        { ...registry.connections[1], authMode: 'oauth', sshTunnelError: 'Invalid stored SSH tunnel' }
+      ]
+    }
+
+    list.mockResolvedValue(withError)
+    const probeConnectionConfig = vi.fn().mockResolvedValue({ reachable: true, authMode: 'oauth', providers: [] })
+    const oauthLoginConnectionConfig = vi.fn().mockResolvedValue({ connected: true })
+    Object.assign(window.hermesDesktop, { probeConnectionConfig, oauthLoginConnectionConfig })
+    render(<ConnectionsRegistrySection />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Use SSH for Gateway and Terminal' }))
+    fireEvent.change(screen.getByPlaceholderText('http://homelab.lan:9119'), {
+      target: { value: 'http://homelab.lan:8223' }
+    })
+    await waitFor(() =>
+      expect(probeConnectionConfig).toHaveBeenCalledWith(
+        'http://homelab.lan:8223',
+        expect.objectContaining({ sshTunnel: null })
+      )
+    )
+    fireEvent.click(await screen.findByRole('button', { name: /Sign in with/ }))
+    await waitFor(() =>
+      expect(oauthLoginConnectionConfig).toHaveBeenCalledWith(
+        'http://homelab.lan:8223',
+        expect.objectContaining({ sshTunnel: null })
+      )
+    )
+  })
+
+  it('edits and clears a saved terminal SSH target without selecting a different gateway', async () => {
+    const withSsh = {
+      ...registry,
+      connections: [
+        registry.connections[0],
+        { ...registry.connections[1], sshTunnel: { host: 'box', user: 'alice', port: 2222, keyPath: '/tmp/key' } }
+      ]
+    }
+
+    list.mockResolvedValue(withSsh)
+    save.mockResolvedValue({ connection: withSsh.connections[1], ok: true, registry: withSsh })
+    render(<ConnectionsRegistrySection />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    expect(screen.getByDisplayValue('alice@box:2222')).toBeTruthy()
+    expect(screen.queryByRole('spinbutton')).toBeNull()
+    expect(screen.queryByText('Backend port on VPS')).toBeNull()
+    fireEvent.change(screen.getByDisplayValue('alice@box:2222'), { target: { value: 'bob@newbox:2223' } })
+    fireEvent.click(screen.getByText('Save connection'))
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'homelab',
+          sshTunnel: { host: 'bob@newbox:2223', keyPath: '/tmp/key' }
+        })
+      )
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    fireEvent.click(screen.getByRole('switch', { name: 'Use SSH for Gateway and Terminal' }))
+    fireEvent.click(screen.getByText('Save connection'))
+    await waitFor(() => expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ sshTunnel: null })))
+  })
+
   it('preserves, replaces and deletes stored headers through plaintext consent without selecting a source', async () => {
     const active = $connection.get()
 
@@ -98,6 +164,7 @@ describe('ConnectionsRegistrySection', () => {
       id: 'homelab',
       kind: 'remote',
       label: 'Homelab',
+      sshTunnel: null,
       url: 'http://homelab.lan:9119',
       authMode: 'token',
       token: 'new-token',
@@ -151,6 +218,7 @@ describe('ConnectionsRegistrySection', () => {
       expect(save).toHaveBeenCalledWith({
         kind: 'remote',
         label: 'New gateway',
+        sshTunnel: null,
         url: 'https://b.example',
         authMode: 'oauth',
         headers: {}

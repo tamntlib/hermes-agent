@@ -1619,6 +1619,11 @@ export const frOverrides = {
       clear: 'Effacer'
     },
     connections: {
+      sshTunnelTitle: "Utiliser SSH pour la passerelle et le terminal",
+      sshTunnelDesc: "Connexion à un backend existant. Desktop ne gère ni ne lance Hermes sur l’hôte SSH. La connexion et les données passent par le tunnel ; l’URL identifie la connexion.",
+      sshTunnelHost: "Hôte SSH / alias",
+      sshTunnelKey: "Fichier d’identité (facultatif)",
+      sshTunnelDestination: "Backend : 127.0.0.1 au port de Gateway URL (HTTP 80 / HTTPS 443 par défaut). Le port de connexion SSH est indépendant.",
       title: 'Connexions',
       intro:
         'Enregistrez tous les emplacements où vivent vos agents : cet appareil, les gateways distantes de votre réseau et les instances Hermes Cloud. Ils sont tous conservés ici.',

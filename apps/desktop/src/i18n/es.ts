@@ -1614,6 +1614,11 @@ export const esOverrides = {
       clear: 'Limpiar'
     },
     connections: {
+      sshTunnelTitle: "Usar SSH para el gateway y el terminal",
+      sshTunnelDesc: "Conecta un backend existente. Desktop no instala, inicia ni administra Hermes en el host SSH. El acceso y los datos usan el túnel; la URL identifica la conexión.",
+      sshTunnelHost: "Host SSH / alias",
+      sshTunnelKey: "Archivo de identidad (opcional)",
+      sshTunnelDestination: "Backend: 127.0.0.1 en el puerto de Gateway URL (HTTP 80 / HTTPS 443 por defecto). El puerto de acceso SSH es independiente.",
       title: 'Gateways registrados',
       intro:
         'Gestiona este dispositivo y cada gateway de Hermes al que puede llegar mediante conexiones remotas, SSH o Cloud.',

@@ -20,6 +20,7 @@ import {
   type TerminalGatewayTarget
 } from './terminal-gateway-target'
 import { createTerminalOutputGate } from './terminal-output-gate'
+import type { TerminalTarget } from './terminal-target'
 import { applyWindowsMsysBashEnvDefaults } from './windows-msys-bash-env'
 import { buildWindowsInteractiveCommand } from './windows-remote-lifecycle'
 
@@ -27,7 +28,7 @@ export interface TerminalIpcDeps {
   isWindows: boolean
   findOnPath: (command: string) => null | string
   rememberLog: (line: string) => void
-  activeSshTerminalTarget: (webContentsId: number) => unknown
+  activeSshTerminalTarget: (webContentsId: number) => TerminalTarget
   /** The ssh client to spawn for remote terminals (resolveSshBinary). */
   sshBinary: () => string
   ensureBackend: (webContentsId: number) => Promise<unknown>
@@ -42,6 +43,7 @@ export interface TerminalIpcDeps {
 export interface TerminalIpcApi {
   disposeTerminalSession: (id: string) => boolean
   disposeTerminalSessionsForSshScope: (scope: string) => void
+  disposeTerminalSessionsForConnection: (connectionId: string) => void
   disposeAllTerminalSessions: () => void
 }
 
@@ -187,6 +189,8 @@ export function registerTerminalIpc({
     delete env.FORCE_COLOR
     delete env.COLORFGBG
 
+    delete env.HERMES_DESKTOP_REMOTE_TOKEN
+    delete env.HERMES_DASHBOARD_SESSION_TOKEN
     env.COLORTERM = 'truecolor'
     env.LC_CTYPE = terminalLcCtype(env)
     env.TERM = 'xterm-256color'
@@ -293,6 +297,15 @@ export function registerTerminalIpc({
     }
   }
 
+  function disposeTerminalSessionsForConnection(connectionId: string) {
+    for (const [id, info] of [...terminalSessions.entries()]) {
+      if (info.terminalConnectionId === connectionId) {
+        info.outputGate.exit({ code: null, signal: 'connection-changed' })
+        disposeTerminalSession(id)
+      }
+    }
+  }
+
   // App shutdown: kill every open PTY before environment teardown.
   function disposeAllTerminalSessions() {
     for (const [id, info] of [...terminalSessions.entries()]) {
@@ -338,7 +351,7 @@ export function registerTerminalIpc({
   async function resolveStartTarget(
     owner: null | TerminalGatewayOwner,
     webContentsId: number
-  ): Promise<{ sshTarget: null | SshTerminalTarget } | { unavailable: 'missing' | 'no-shell' }> {
+  ): Promise<{ sshTarget: null | SshTerminalTarget } | { unavailable: 'missing' | 'no-shell'; connectionId: string }> {
     if (!owner) {
       return { sshTarget: await resolveTerminalConnectionForSender(webContentsId, activeSshTerminalTarget, ensureBackend) }
     }
@@ -349,7 +362,7 @@ export function registerTerminalIpc({
     )
 
     if (target === 'missing' || target === 'no-shell') {
-      return { unavailable: target }
+      return { unavailable: target, connectionId: owner.connectionId }
     }
 
     return { sshTarget: target === 'local' ? null : target }
@@ -361,6 +374,10 @@ export function registerTerminalIpc({
       return owner.connectionId
     }
 
+    if (sshTarget?.terminalOnly) {
+      return sshTarget.connectionId
+    }
+
     return sshTarget ? getSshConnectionState(sshTarget.scope)?.registryConnectionId || null : 'local'
   }
 
@@ -369,7 +386,6 @@ export function registerTerminalIpc({
 
     const id = crypto.randomUUID()
     const { args, command, name } = terminalShellCommand()
-    const cwd = safeTerminalCwd(payload?.cwd)
     const cols = Math.max(2, Number.parseInt(String(payload?.cols || 80), 10) || 80)
     const rows = Math.max(2, Number.parseInt(String(payload?.rows || 24), 10) || 24)
 
@@ -379,24 +395,59 @@ export function registerTerminalIpc({
     // Removed gateway, or one with no shell transport: report it instead of
     // spawning a local shell the tab would label with the remote's name.
     if ('unavailable' in resolved) {
-      return { connectionId: owner?.connectionId ?? null, cwd: null, id: '', shell: '', unavailable: resolved.unavailable }
+      return { connectionId: resolved.connectionId, cwd: null, id: '', shell: '', unavailable: resolved.unavailable }
     }
 
     const { sshTarget } = resolved
+    const currentTarget = owner ? gatewayTarget(owner) : activeSshTerminalTarget(event.sender.id)
+
+    if (
+      (sshTarget?.terminalOnly || (currentTarget && typeof currentTarget === 'object' && currentTarget.terminalOnly)) &&
+      JSON.stringify(currentTarget) !== JSON.stringify(sshTarget)
+    ) {
+      throw new Error('Terminal connection changed. Open the terminal again.')
+    }
+
+    if (event.sender.isDestroyed()) {
+      throw new Error('Terminal window was closed.')
+    }
+
     const remote = Boolean(sshTarget)
-    const remoteState = remote ? getSshConnectionState(sshTarget.scope) : null
+    const cwd = remote ? undefined : safeTerminalCwd(payload?.cwd)
 
-    const remoteCommand =
-      remoteState?.remotePlatform === 'Windows'
-        ? buildWindowsInteractiveCommand(String(payload?.cwd || '').trim())
-        : undefined
+    function spawnRemoteTerminal(target: SshTerminalTarget) {
+      const remoteState = !target.terminalOnly ? getSshConnectionState(target.scope) : null
 
-    const ptyProcess = remote
-      ? nodePty.spawn(
-          sshBinary(),
-          buildInteractiveSshArgs(sshTarget.ssh, String(payload?.cwd || '').trim(), undefined, remoteCommand),
-          { cols, cwd: app.getPath('home'), env: terminalShellEnv(), name: 'xterm-256color', rows }
-        )
+      const remoteCommand =
+        remoteState?.remotePlatform === 'Windows'
+          ? buildWindowsInteractiveCommand(String(payload?.cwd || '').trim())
+          : undefined
+
+      return nodePty.spawn(
+        sshBinary(),
+        target.terminalOnly
+          ? [
+              '-o',
+              'ControlMaster=no',
+              '-o',
+              'ControlPath=none',
+              '-o',
+              'ControlPersist=no',
+              '-o',
+              'ClearAllForwardings=yes',
+              '-o',
+              'ForwardAgent=no',
+              '-o',
+              'ForwardX11=no',
+              ...buildInteractiveSshArgs(target.ssh, String(payload?.cwd || '').trim())
+            ]
+          : buildInteractiveSshArgs(target.ssh, String(payload?.cwd || '').trim(), undefined, remoteCommand),
+        { cols, cwd: app.getPath('home'), env: terminalShellEnv(), name: 'xterm-256color', rows }
+      )
+    }
+
+    const ptyProcess = sshTarget
+      ? spawnRemoteTerminal(sshTarget)
       : nodePty.spawn(command, args, { cols, cwd, env: terminalShellEnv(), name: 'xterm-256color', rows })
 
     const send = (suffix, payload) => {
@@ -417,7 +468,8 @@ export function registerTerminalIpc({
       outputGate,
       pty: ptyProcess,
       webContentsId: event.sender.id,
-      ...(remote ? { sshScope: sshTarget.scope, remoteCwd: String(payload?.cwd || '') } : {})
+      ...(remote ? { sshScope: sshTarget.scope, remoteCwd: String(payload?.cwd || '') } : {}),
+      ...(sshTarget?.terminalOnly ? { terminalConnectionId: sshTarget.connectionId } : {})
     })
 
     ptyProcess.onData(data => outputGate.data(data))
@@ -452,10 +504,10 @@ export function registerTerminalIpc({
     return true
   })
 
-  ipcMain.handle('hermes:terminal:write', (_event, id, data) => {
+  ipcMain.handle('hermes:terminal:write', (event, id, data) => {
     const sessionInfo = terminalSessions.get(String(id || ''))
 
-    if (!sessionInfo) {
+    if (!sessionInfo || sessionInfo.webContentsId !== event.sender.id) {
       return false
     }
 
@@ -464,10 +516,10 @@ export function registerTerminalIpc({
     return true
   })
 
-  ipcMain.handle('hermes:terminal:resize', (_event, id, size = {}) => {
+  ipcMain.handle('hermes:terminal:resize', (event, id, size = {}) => {
     const sessionInfo = terminalSessions.get(String(id || ''))
 
-    if (!sessionInfo) {
+    if (!sessionInfo || sessionInfo.webContentsId !== event.sender.id) {
       return false
     }
 
@@ -478,17 +530,30 @@ export function registerTerminalIpc({
 
     return true
   })
-  ipcMain.handle('hermes:terminal:cwd', async (_event, id) => {
+  ipcMain.handle('hermes:terminal:cwd', async (event, id) => {
     const sessionInfo = terminalSessions.get(String(id || ''))
 
-    if (!sessionInfo) {
+    if (!sessionInfo || sessionInfo.webContentsId !== event.sender.id) {
       return null
     }
 
     return sessionInfo.sshScope !== undefined ? null : readProcessCwd(sessionInfo.pty.pid)
   })
 
-  ipcMain.handle('hermes:terminal:dispose', (_event, id) => disposeTerminalSession(String(id || '')))
+  ipcMain.handle('hermes:terminal:dispose', (event, id) => {
+    const key = String(id || '')
 
-  return { disposeTerminalSession, disposeTerminalSessionsForSshScope, disposeAllTerminalSessions }
+    if (terminalSessions.get(key)?.webContentsId !== event.sender.id) {
+      return false
+    }
+
+    return disposeTerminalSession(key)
+  })
+
+  return {
+    disposeTerminalSession,
+    disposeTerminalSessionsForSshScope,
+    disposeTerminalSessionsForConnection,
+    disposeAllTerminalSessions
+  }
 }

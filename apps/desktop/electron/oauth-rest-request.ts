@@ -1,11 +1,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 
-import { readJsonErrorBody, readStatusCode } from './api-transport'
+import { httpStatusError, readJsonErrorBody, readStatusCode } from './api-transport'
 import { isGatewayAuthRejection } from './connection-config'
 import { type NativeAccessTokenOptions, NativeAuthChangedError } from './native-access-token'
 import { shouldRotateNativeTokenAfterRejection } from './native-auth-decisions'
 
 export interface OauthRestRequestDeps<T> {
+  nativeOnly?: boolean
   ensureNativeAccessToken: (baseUrl: string, options?: NativeAccessTokenOptions) => Promise<string | null>
   requestWithBearer: (accessToken: string) => Promise<T>
   requestWithCookie: () => Promise<T>
@@ -47,13 +48,22 @@ export async function requestWithOauthFallback<T>(baseUrl: string, deps: OauthRe
   try {
     nativeAccessToken = await deps.ensureNativeAccessToken(baseUrl)
   } catch (error) {
+    if (deps.nativeOnly) {
+      throw error
+    }
+
     return cookieFallback(deps.requestWithCookie, error)
+  }
+
+  if (!nativeAccessToken && deps.nativeOnly) {
+    throw httpStatusError(401, 'SSH Gateway requires native sign-in. Open Connections and sign in through SSH.')
   }
 
   return nativeAccessToken ? deps.requestWithBearer(nativeAccessToken) : deps.requestWithCookie()
 }
 
 export interface MintGatewayWsTicketDeps {
+  nativeOnly?: boolean
   ensureNativeAccessToken: OauthRestRequestDeps<unknown>['ensureNativeAccessToken']
   fetchJson: (url: string, token: string | null, options: any) => Promise<any>
   fetchJsonViaOauthSession: (url: string, options: any) => Promise<any>
@@ -151,6 +161,7 @@ export async function mintGatewayWsTicket(
 
   return requestWithOauthFallback(baseUrl, {
     ensureNativeAccessToken: deps.ensureNativeAccessToken,
+    nativeOnly: deps.nativeOnly,
     requestWithCookie,
     requestWithBearer: async nativeAt => {
       try {
@@ -177,6 +188,10 @@ export async function mintGatewayWsTicket(
       } catch (error) {
         if (readStatusCode(error) === 401) {
           markStaleAppToken(error)
+        }
+
+        if (deps.nativeOnly) {
+          throw error
         }
 
         return cookieFallback(requestWithCookie, error)

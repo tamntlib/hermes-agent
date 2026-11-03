@@ -17,6 +17,13 @@ export const zhHantSettings = {
   },
 
   settings: {
+    connections: {
+      sshTunnelTitle: "閘道和終端機使用 SSH",
+      sshTunnelDesc: "連線至現有後端。Desktop 不會在 SSH 主機上安裝、啟動或管理 Hermes。登入和資料均經過通道；URL 用於識別連線。",
+      sshTunnelHost: "SSH 主機 / 別名",
+      sshTunnelKey: "金鑰檔案（選填）",
+      sshTunnelDestination: "後端：127.0.0.1，連接埠取自 Gateway URL（預設 HTTP 80 / HTTPS 443）。SSH 登入連接埠獨立設定。",
+    },
     memoryLayers: zhHantMemoryLayers,
     subpages: {
       appearanceTheme: '主題',

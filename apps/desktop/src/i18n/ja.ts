@@ -247,6 +247,13 @@ export const jaOverrides = {
   },
 
   settings: {
+    connections: {
+      sshTunnelTitle: "ゲートウェイとターミナルに SSH を使用",
+      sshTunnelDesc: "既存のバックエンドに接続します。SSH ホスト上の Hermes のインストールや起動、管理は行いません。ログインとデータはトンネルを使用し、URL は接続の識別に使います。",
+      sshTunnelHost: "SSH ホスト / エイリアス",
+      sshTunnelKey: "秘密鍵ファイル（任意）",
+      sshTunnelDestination: "バックエンド: 127.0.0.1 の Gateway URL のポート（既定は HTTP 80 / HTTPS 443）。SSH ログインのポートは別です。",
+    },
     memoryLayers: jaMemoryLayers,
     // Window plans (Nous subscription with included usage). Other billing strings: overlay-gaps.json.
     billing: {

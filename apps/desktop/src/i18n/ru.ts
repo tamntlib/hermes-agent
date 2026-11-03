@@ -1002,6 +1002,11 @@ export const ruOverrides = {
     },
     // v2 multi-connection registry: Settings → Gateways.
     connections: {
+      sshTunnelTitle: "Использовать SSH для шлюза и терминала",
+      sshTunnelDesc: "Подключение к существующему серверу. Desktop не устанавливает и не запускает Hermes на SSH-хосте. Вход и данные идут через туннель; URL задаёт идентичность подключения.",
+      sshTunnelHost: "SSH-хост / псевдоним",
+      sshTunnelKey: "Файл ключа (необязательно)",
+      sshTunnelDestination: "Сервер: 127.0.0.1, порт из Gateway URL (по умолчанию HTTP 80 / HTTPS 443). Порт входа SSH задаётся отдельно.",
       title: 'Зарегистрированные шлюзы',
       intro:
         'Управляйте этим устройством и всеми шлюзами Hermes, до которых можно дотянуться через удалённые, SSH или Cloud-соединения.',
