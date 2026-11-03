@@ -176,6 +176,10 @@ def _attach_built_agent(sid: str, current: dict, agent) -> bool:
     _session_todo_state(current)
     # Baseline for the per-turn config sync (profile home override still active).
     current["config_model_seen"] = _config_model_target()
+    # First-submit can insert the row before the deferred runtime exists. Fill its
+    # actual named route now; waiting for /model leaves resume with billing "custom".
+    if getattr(agent, "_session_db", None) is not None:
+        _persist_live_session_runtime(current)
     return True
 
 

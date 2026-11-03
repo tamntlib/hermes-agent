@@ -428,6 +428,31 @@ def _custom_identity_entries(config: dict[str, Any]):
             yield custom_provider_slug(name, str(entry.get("provider_key") or "")), entry
 
 
+def recover_custom_route_identity(*, base_url: str, api_mode: Optional[str] = None,
+                                  model: Optional[str] = None) -> Optional[str]:
+    """Recover only a unique exact endpoint/protocol route, including tier-declared entries.
+
+    This is NOT paid-tier authorization: callers restoring a legacy bare-custom session must
+    reset inferred service-tier preferences to normal. ``model`` is accepted as route context
+    but never selects a provider; same-model siblings are not evidence of endpoint ownership.
+    Raw metadata is scanned without projecting entries or resolving any credential.
+    """
+    target = _normalize_base_url_for_match(base_url)
+    if not target:
+        return None
+    rp = _rp()
+    mode = rp._parse_api_mode(api_mode) if api_mode is not None else None
+    if api_mode is not None and mode is None:
+        return None
+    try:
+        config = rp.load_config()
+    except Exception:  # health: allow BLE001 -- optional route lookup fails closed; parser tracebacks can expose credentials
+        logger.debug("Custom route configuration unavailable")
+        return None
+    matches = [identity for identity, entry in _custom_identity_entries(config)
+               if _normalize_base_url_for_match(_entry_url(entry)) == target
+               and (mode is None or rp._parse_api_mode(entry.get("api_mode") or entry.get("transport")) == mode)]
+    return matches[0] if len(matches) == 1 else None
 
 
 def canonical_custom_identity(*, base_url: Optional[str] = None, config_provider: Optional[str] = None,
