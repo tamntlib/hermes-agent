@@ -28,15 +28,20 @@ def without_service_tier(overrides: Any) -> dict[str, Any]:
 
 
 def _offered_tier_overrides(tier: str, model: Any, provider: Any, base_url: Any,
-                            access_token: Any = None) -> Optional[dict[str, Any]]:
+    access_token: Any = None, *, requested_provider: Any = None, api_mode: Any = None,
+) -> Optional[dict[str, Any]]:
     """Request overrides for *tier* on this route, or None when the route (or, for ultrafast, the route's own Codex
     account, ``access_token``) does not offer it. The same gates as ``/fast``."""
     from hermes_cli.models import resolve_fast_mode_overrides
-    fast = resolve_fast_mode_overrides(model, provider=provider, base_url=base_url, tier=tier)
+    fast = resolve_fast_mode_overrides(
+        model, provider=provider, base_url=base_url, tier=tier,
+        requested_provider=requested_provider, api_mode=api_mode)
     if fast and tier == "ultrafast":
         from agent.codex_service_tiers import ultrafast_offered
         # The Codex backend accepts ultrafast from a plan without it and serves another tier instead.
-        if not ultrafast_offered(model, provider=provider, base_url=base_url, access_token=access_token):
+        if not ultrafast_offered(
+                model, provider=provider, base_url=base_url, access_token=access_token,
+                requested_provider=requested_provider, api_mode=api_mode):
             return None
     return fast
 
@@ -57,12 +62,16 @@ def task_service_tier(word: str, creds: dict[str, Any], parent_agent) -> dict[st
     model = creds.get("model") or getattr(parent_agent, "model", None)
     base_url = creds.get("base_url") if pinned else getattr(parent_agent, "base_url", None)
     api_key = creds.get("api_key") if pinned else getattr(parent_agent, "api_key", None)
+    requested = (creds.get("requested_provider") or creds.get("provider")) if pinned else getattr(
+        parent_agent, "requested_provider", None)
+    api_mode = creds.get("api_mode") if pinned else getattr(parent_agent, "api_mode", None)
     base = creds.get("request_overrides")
     if base is None and not creds.get("provider"):
         base = getattr(parent_agent, "request_overrides", None)
     fast: dict[str, Any] = {}
     if tier:
-        fast = _offered_tier_overrides(tier, model, provider, base_url, api_key) or {}
+        fast = _offered_tier_overrides(tier, model, provider, base_url, api_key,
+                                       requested_provider=requested, api_mode=api_mode) or {}
         if not fast:
             raise ValueError(
                 f"service_tier '{word}' is not available for model '{model}' on provider '{provider}'. "

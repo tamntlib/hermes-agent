@@ -647,6 +647,18 @@ def _thinking_kwargs(reasoning_config: dict[str, Any], model: str, effective_max
 _TOOL_CHOICE_MAP = {None: {"type": "auto"}, "auto": {"type": "auto"}, "required": {"type": "any"}}
 
 
+def apply_anthropic_service_tier_override(
+    kwargs: dict[str, Any], *, speed: str | None, service_tiers: tuple[str, ...] | None,
+    base_url: str | None = None, is_oauth: bool = False, drop_context_1m_beta: bool = False,
+) -> None:
+    """Carry an exact route's declared priority authorization past native-only defaults."""
+    if speed != "fast" or "priority" not in (service_tiers or ()):
+        return
+    kwargs.setdefault("extra_body", {})["speed"] = "fast"
+    betas = _common_betas_for_base_url(base_url, drop_context_1m_beta=drop_context_1m_beta)
+    kwargs["extra_headers"] = _beta_header(betas + (_OAUTH_ONLY_BETAS if is_oauth else []) + [_FAST_MODE_BETA])
+
+
 def build_anthropic_kwargs(
     model: str, messages: list[dict], tools: Optional[list[dict]], max_tokens: Optional[int],
     reasoning_config: Optional[dict[str, Any]], tool_choice: Optional[str] = None,

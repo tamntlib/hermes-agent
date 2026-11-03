@@ -329,9 +329,14 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
     profile_home = _profile_home(profile := (params.get("profile") or "").strip() or None)
     # Reject an incoherent model×provider pair BEFORE any state exists: minting it only defers the
     # failure to the first turn's provider 404 (#96817). Custom/unknown providers stay permissive.
-    from .methods_session_model_guard import model_override_conflict
+    from .methods_session_model_guard import validated_create_overrides, model_override_conflict
     if conflict := model_override_conflict(params, _profile_build_scope(profile_home)):
         return _err(rid, -32602, conflict.pop("message"), conflict)
+    try:
+        session_model_override, create_reasoning_override, create_service_tier_override = validated_create_overrides(
+            params, _profile_build_scope(profile_home))
+    except ValueError as exc:
+        return _err(rid, 4002, str(exc))
     # Idempotency: a client retrying a create whose first response was lost
     # should get back the SAME session, not a fresh one (which would leave a
     # duplicate child). The caller supplies a stable key per logical create.
@@ -393,11 +398,6 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
     # (#108205: the desktop arm lets the client vouch for a host-invisible path, #52589 provenance).
     explicit_cwd, session_cwd, remote_cwd = _resolve_create_cwd(params, source, profile_home)
     _enable_gateway_prompts()
-    from .methods_session_model_guard import create_overrides
-    try:
-        session_model_override, create_reasoning_override, create_service_tier_override = create_overrides(params)
-    except ValueError as exc:
-        return _err(rid, 4002, str(exc))
     composer_override_profile = None
     if session_model_override and _flag(params, "follow_profile_config"):
         # Same provenance a mid-chat switch records (_apply_model_switch): without the OWNING profile's

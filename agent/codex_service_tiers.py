@@ -162,19 +162,22 @@ def apply_daybreak(agent: Any, overrides: dict[str, Any]) -> None:
     overrides["extra_body"] = extra_body
 
 
-def ultrafast_offered(model: Any, *, provider: Any = None, base_url: Any = None, access_token: Any = None) -> bool:
+def ultrafast_offered(
+    model: Any, *, provider: Any = None, requested_provider: Any = None,
+    base_url: Any = None, api_mode: Any = None, access_token: Any = None, config: Any = None,
+) -> bool:
     """Whether ``/fast ultrafast`` (and the Ultrafast picker row) is offered on this route: the route
     gate plus, on the ChatGPT/Codex subscription, the account's own Codex catalog. That backend accepts
     ``service_tier: "ultrafast"`` from a plan without the entitlement and silently serves the default
     tier, so the catalog the official client reads is the authority. An unreadable catalog never
     blocks (request-time negotiation still clamps per credential)."""
-    from urllib.parse import urlparse
-
     from hermes_cli.models import normalize_provider, resolve_fast_mode_overrides
-    if resolve_fast_mode_overrides(model, provider=provider, base_url=base_url, tier="ultrafast") is None:
+    if resolve_fast_mode_overrides(
+        model, provider=provider, requested_provider=requested_provider, base_url=base_url,
+        api_mode=api_mode, tier="ultrafast", config=config,
+    ) is None:
         return False
-    on_codex_sub = (provider and normalize_provider(provider) == "openai-codex") or (
-        (urlparse(str(base_url or "")).hostname or "").lower() == "chatgpt.com")
+    on_codex_sub = normalize_provider(str(requested_provider or provider or "")) == "openai-codex"
     return not on_codex_sub or codex_account_offers_tier(
         model, "ultrafast", base_url=base_url, access_token=access_token) is not False
 
@@ -182,6 +185,7 @@ def ultrafast_offered(model: Any, *, provider: Any = None, base_url: Any = None,
 def ultrafast_offered_for(cli: Any, model: Any) -> bool:
     """:func:`ultrafast_offered` on a CLI shell's resolved route (attributes absent before setup)."""
     return ultrafast_offered(model, provider=getattr(cli, "provider", None), base_url=getattr(cli, "base_url", None),
+                             requested_provider=getattr(cli, "requested_provider", None), api_mode=getattr(cli, "api_mode", None),
                              access_token=getattr(cli, "api_key", None))
 
 

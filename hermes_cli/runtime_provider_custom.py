@@ -32,7 +32,9 @@ def _normalize_custom_provider_name(value: str) -> str:
 
 
 def _normalize_base_url_for_match(value) -> str:
-    return str(value or "").strip().rstrip("/").lower()
+    from hermes_cli.route_identity import normalize_route_base_url
+
+    return normalize_route_base_url(str(value or "").strip())
 
 
 def _route_key(value) -> str:
@@ -298,6 +300,13 @@ def codex_model_provider_id(requested_provider: str) -> Optional[str]:
 # ── identity recovery (bare "custom" -> durable ``custom:<name>``) ─────────────────────────
 
 
+def _declares_service_tiers(entry: dict[str, Any]) -> bool:
+    """A legacy endpoint/model guess must not mint authority to use paid tiers."""
+    models = entry.get("models")
+    values = models.values() if isinstance(models, dict) else models if isinstance(models, list) else ()
+    return "service_tiers" in entry or any(isinstance(model, dict) and "service_tiers" in model for model in values)
+
+
 def _find_custom_identity(matches: Callable[[dict[str, Any]], bool],
                           config: Optional[dict[str, Any]] = None, prefer: Optional[str] = None) -> Optional[str]:
     """First enabled entry in ``providers:`` then legacy ``custom_providers:`` where ``matches(entry)``
@@ -319,7 +328,7 @@ def _find_custom_identity(matches: Callable[[dict[str, Any]], bool],
             slug = custom_provider_slug(str(ep_name), str(ep_name))
             if _entry_url(entry):
                 owned.add(slug)
-            if matches(entry):
+            if not _declares_service_tiers(entry) and matches(entry):
                 if prefer is None or slug == prefer:
                     return slug
                 first = first or slug
@@ -329,7 +338,7 @@ def _find_custom_identity(matches: Callable[[dict[str, Any]], bool],
         custom_providers = None
     for entry in custom_providers or []:
         name = entry.get("name") if isinstance(entry, dict) else None
-        if isinstance(name, str) and name.strip() and matches(entry):
+        if isinstance(name, str) and name.strip() and not _declares_service_tiers(entry) and matches(entry):
             slug = custom_provider_slug(name, str(entry.get("provider_key", "") or ""))
             if slug in owned and not entry.get("provider_key"):
                 continue
@@ -402,16 +411,50 @@ def _endpoint_identity(base_url: str) -> Optional[str]:
     return None
 
 
+def _custom_identity_entries(config: dict[str, Any]):
+    """Enabled raw entries and durable identities, without credential resolution or projection."""
+    from hermes_cli.config import is_provider_enabled
+
+    providers = config.get("providers")
+    for key, entry in (providers.items() if isinstance(providers, dict) else ()):
+        if isinstance(entry, dict) and is_provider_enabled(entry):
+            yield custom_provider_slug(str(key), str(key)), entry
+    legacy = config.get("custom_providers")
+    for entry in (legacy if isinstance(legacy, list) else ()):
+        if not isinstance(entry, dict) or not is_provider_enabled(entry):
+            continue
+        name = entry.get("name")
+        if isinstance(name, str) and name.strip():
+            yield custom_provider_slug(name, str(entry.get("provider_key") or "")), entry
+
+
+
+
 def canonical_custom_identity(*, base_url: Optional[str] = None, config_provider: Optional[str] = None,
                               model: Optional[str] = None, requested: Optional[str] = None) -> Optional[str]:
     """Recover the durable menu identity for a bare custom provider. Match a configured
     endpoint first, then the ownership-checked managed server, then a configured model or
     provider. Every session persistence/restore path shares this lookup."""
     rp = _rp()
-    # The entry the live agent resolved (*requested*) while it still serves base_url, else its owner.
-    identity = session_provider_identity("custom", requested, base_url) if base_url else "custom"
-    if identity != "custom":
-        return identity
+    if base_url:
+        try:
+            matches = [(identity, entry) for identity, entry in _custom_identity_entries(rp.load_config())
+                       if _normalize_base_url_for_match(_entry_url(entry)) == _normalize_base_url_for_match(base_url)]
+        except Exception:  # health: allow BLE001 -- optional route lookup fails closed; parser tracebacks can expose credentials
+            logger.debug("Custom route identity lookup failed")
+            return None
+        if matches:
+            # A known endpoint cannot redirect to a sibling via a shared model or default.
+            # Routing identity is not authority to opt this legacy session into paid tiers.
+            if len(matches) == 1 and not _declares_service_tiers(matches[0][1]):
+                return matches[0][0]
+            return None
+        # The managed server has no custom-provider config entry. Recover its menu key
+        # from the ownership-checked endpoint, never from a model name or a fixed port.
+        from hermes_cli.local_runtime.endpoint import _state_endpoint
+        endpoint = _state_endpoint()
+        if endpoint and _normalize_base_url_for_match(base_url) == _normalize_base_url_for_match(endpoint["base_url"]):
+            return "llamacpp"
     identity = find_custom_provider_identity_by_model(model) if model else None
     if identity:
         return identity
@@ -435,8 +478,14 @@ def canonical_custom_identity(*, base_url: Optional[str] = None, config_provider
         entry = rp._get_named_custom_provider(candidate)
     except Exception:
         return None
-    if entry is None:
+    if entry is None or _declares_service_tiers(entry):
         return None
+    # The credential resolver's projected entry omits metadata; consult the raw
+    # selected key too, without allowing its URL to authorize an opted-in sibling.
+    for configured in rp.get_compatible_custom_providers(rp.load_config()):
+        if candidate_norm in custom_provider_aliases(configured.get("name", ""), configured.get("provider_key", "")):
+            if _declares_service_tiers(configured):
+                return None
     try:
         identity = find_custom_provider_identity(str(entry.get("base_url") or ""))
     except Exception:
@@ -740,6 +789,8 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
         provider_name=custom_provider.get("provider_key") or custom_provider.get("name"),
     )
     if pool_result:
+        # Direct policy callers bypass the public resolver's identity tag.
+        pool_result["requested_provider"] = requested_provider
         # The pool doesn't know the custom_providers fields — propagate them here too.
         _apply_custom_provider_extras(custom_provider, target_model, pool_result)
         return pool_result

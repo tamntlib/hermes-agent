@@ -1371,6 +1371,42 @@ Older configs used a top-level `custom_providers:` list instead. It still works 
 
 **Reasoning effort on custom endpoints.** The configured `reasoning_effort` (`/reasoning max`, `agent.reasoning_effort`) reaches a custom endpoint unchanged on both the `chat_completions` and the `codex_responses` transport — up to `max`; only the Hermes-internal `ultra` is clamped to `max`. Two exceptions follow the host rather than the entry: a custom entry pointed at `api.openai.com` keeps OpenAI's per-model ladder (`max` is a gpt-5.6-only level there), and an entry pointed at a provider whose profile publishes a per-model vocabulary (Ramp Router) is clamped to that catalog. An endpoint that rejects the level answers with an HTTP 400 instead of Hermes silently downgrading it. When no effort is configured at all, `chat_completions` requests carry `reasoning_effort: medium` — the same default the Nous Portal and OpenRouter routes apply — rather than leaving the endpoint's own default in charge (kimi-k3's is `max`, about 3x the reasoning tokens of `medium`); models marked `supports_reasoning: false` in the catalog or `model_overrides`, and Ollama models without the `thinking` capability, keep the field off.
 
+**Session-scoped processing tiers on a custom endpoint.** Declare only the paid tiers your
+endpoint supports; this enables the existing session controls without turning Fast on globally:
+
+```yaml
+providers:
+  my-proxy:
+    api: https://proxy.example.com/v1
+    key_env: PROXY_API_KEY
+    transport: codex_responses
+    service_tiers: [priority]
+    models:
+      premium-model:
+        service_tiers: [priority, ultrafast]
+      standard-model:
+        service_tiers: []
+```
+
+The accepted tier IDs are exactly `priority` and `ultrafast`. A model's explicit list
+**replaces** its provider's list; `[]` disables paid tiers. An omitted list retains Hermes's
+existing first-party route policy. Invalid lists raise a configuration error. Normal is implicit;
+`auto` and `cold` are Fast-window policies, not tier IDs, and require `priority` support.
+An `[ultrafast]`-only route does not implicitly support Priority.
+
+Select the named provider and use `/fast fast`, `/fast ultrafast`, or `/fast normal` (or the
+Desktop speed controls). The choice belongs to that session and survives resume; the capability
+list does not select a default tier. Hermes binds the declaration to the exact provider key,
+endpoint and transport, not to other providers sharing its URL. On `codex_responses` and
+`chat_completions`, paid tiers use `service_tier`; on `anthropic_messages`, Priority uses
+`speed: fast` and Ultrafast is unavailable. Unsupported choices are refused, not changed to a
+different paid tier. Changing the selected route re-evaluates the request against that route.
+
+Do not also pin `extra_body.service_tier` (or `extra_body.speed`) if the session's Normal/Fast
+control should own that field: an unconditional request-body override is a separate policy.
+A successful Priority request or a response's tier label does not guarantee upstream scheduling
+or account entitlement; enable only tiers verified with the serving endpoint.
+
 Some OpenAI-compatible endpoints need provider-specific request body fields. Add an `extra_body` map to the matching custom provider and Hermes will merge it into each chat-completions request for that endpoint:
 
 ```yaml

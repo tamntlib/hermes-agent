@@ -1112,6 +1112,30 @@ def _clear_pending(sid: str | None = None) -> None:
 # ── Agent factory ────────────────────────────────────────────────────
 
 
+def _runtime_model_config(agent, existing: dict | None = None) -> dict:
+    """Merge the agent's CURRENT runtime identity onto the row's persisted ``model_config``. Falsy agent
+    attributes DELETE the key rather than skip the write: resume reads provider/endpoint from this JSON
+    (model column written separately), so a stale provider would route the resumed chat to the wrong endpoint."""
+    config = dict(existing or {})
+    agent = session_runtime_view(agent)
+    attr = lambda k: str(getattr(agent, k, "") or "").strip()
+    model, provider, base_url = attr("model"), attr("provider"), attr("base_url")
+    if provider.lower() == "custom":
+        from hermes_cli.runtime_provider_custom import session_provider_identity
+        provider = session_provider_identity(provider, attr("requested_provider"), base_url, model)
+    reasoning_config = getattr(agent, "reasoning_config", None)
+    live = {
+        "model": model, "provider": provider, "base_url": base_url, "api_mode": attr("api_mode"),
+        # An empty dict is still a real (present) reasoning config.
+        "reasoning_config": reasoning_config if isinstance(reasoning_config, dict) else None,
+        "service_tier": getattr(agent, "service_tier", None),
+    }
+    for key, value in live.items():
+        if value or isinstance(value, dict):
+            config[key] = value
+        else:
+            config.pop(key, None)
+    return config
 
 
 def _live_session_agent_db(session: dict | None):
@@ -1434,21 +1458,11 @@ def _live_session_identity(session: dict) -> tuple[str, str]:
     return str(model or default[0]), str(provider or default[1])
 
 
-def _fast_tier_applies(agent, model: str, provider: str, *, route_known: bool, tier: str | None = None) -> bool:
-    """Whether a priority tier reaches this session's route. Every request builder asks the same gate, so a
-    profile-wide ``service_tier: fast`` sends nothing to a local server or a proxy, and the session must not
-    report Fast there either. ``route_known`` is False while a switch is pending: the agent's base URL still
-    belongs to the old route."""
-    from hermes_cli.models import resolve_fast_mode_overrides
-    base_url = None
-    if route_known and agent is not None:
-        if getattr(agent, "api_mode", None) == "anthropic_messages":
-            base_url = getattr(agent, "_anthropic_base_url", None)
-        base_url = base_url or getattr(agent, "base_url", None)
-    try:
-        return resolve_fast_mode_overrides(model, provider=provider or None, base_url=base_url, tier=tier) is not None
-    except Exception:
-        return False
+def _fast_tier_applies(agent, model: str, provider: str, *, route_known: bool, tier: str | None = None,
+                       profile_home=None) -> bool:
+    """Whether the static tier reaches the live or pending session route."""
+    from .service_tiers import tier_applies
+    return tier_applies(agent, model, provider, route_known=route_known, tier=tier, profile_home=profile_home)
 
 
 def _session_info(agent, session: dict | None = None) -> dict:
@@ -1497,7 +1511,7 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "reasoning_effort": reasoning_effort, "reasoning_effort_wire": reasoning_effort_wire,
         "service_tier": service_tier,
         "fast": service_tier in STATIC_TIERS and _fast_tier_applies(agent, model, pending_provider or provider,
-                                                                    route_known=not pending_provider, tier=service_tier),
+                         route_known=not pending_switch, tier=service_tier, profile_home=sess.get("profile_home") or _hermes_home),
         "yolo": yolo, "approval_mode": approval_mode,
         "tools": dict(mirror.get("tools") or {}) if isinstance(mirror.get("tools"), dict) else {},
         "skills": dict(mirror.get("skills") or {}) if isinstance(mirror.get("skills"), dict) else {},
@@ -2037,5 +2051,11 @@ for _m in (
     _methods_session_control, _methods_subagents, _methods_vault, _methods_free_tier, _methods_connectors,
     _methods_connectors_account, _methods_display, _methods_display_watch, _methods_onboarding,
     _methods_i18n, _methods_machine, _methods_shared_metrics, _methods_plugin_catalog):
-    _m.register(sys.modules[__name__])
+    if _m is _agent_factory:
+        # Keep the exact named-provider projection above; all other factory functions
+        # still bind to this namespace through the upstream split-module seam.
+        from .method_ctx import bind_module as _bind_agent_factory
+        _bind_agent_factory(vars(_m), sys.modules[__name__], skip=("_runtime_model_config",))
+    else:
+        _m.register(sys.modules[__name__])
 del _m

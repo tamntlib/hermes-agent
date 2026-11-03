@@ -78,13 +78,27 @@ def effective_request_overrides(agent: Any) -> dict[str, Any]:
     """``agent.request_overrides`` plus the fast override while the window is open, minus
     ``speed`` for a model this session learned has no fast capacity."""
     overrides = dict(getattr(agent, "request_overrides", None) or {})
-    if getattr(agent, "service_tier", None) in BOUNDED_MODES and time.monotonic() < getattr(agent, "_fast_until", 0.0):
+    mode = getattr(agent, "service_tier", None)
+    # Legacy callers may supply an already validated static override without an agent
+    # route. Real agents carry requested_provider; re-project those on every request.
+    has_route = bool(getattr(agent, "model", None)) and isinstance(getattr(agent, "requested_provider", None), str)
+    static = mode in STATIC_TIERS and (has_route or not {"service_tier", "speed"}.intersection(overrides))
+    if static or (mode in BOUNDED_MODES and time.monotonic() < getattr(agent, "_fast_until", 0.0)):
         from hermes_cli.models import resolve_fast_mode_overrides
         base_url = getattr(agent, "base_url", None)
         if getattr(agent, "api_mode", None) == "anthropic_messages":
             base_url = getattr(agent, "_anthropic_base_url", None) or base_url
+        # Re-project against the live route after a switch/fallback; never reuse a paid
+        # override pinned for another provider or a fresh Desktop agent's missing one.
+        overrides.pop("service_tier", None)
+        overrides.pop("speed", None)
         overrides.update(
-            resolve_fast_mode_overrides(getattr(agent, "model", None), provider=getattr(agent, "provider", None), base_url=base_url) or {}
+            resolve_fast_mode_overrides(
+                getattr(agent, "model", None), provider=getattr(agent, "provider", None),
+                requested_provider=getattr(agent, "requested_provider", None),
+                api_mode=getattr(agent, "api_mode", None),
+                base_url=base_url, tier="ultrafast" if mode == "ultrafast" else None,
+            ) or {}
         )
     if "speed" in overrides and getattr(agent, "model", None) in (getattr(agent, "_fast_mode_unavailable_models", None) or ()):
         overrides.pop("speed", None)

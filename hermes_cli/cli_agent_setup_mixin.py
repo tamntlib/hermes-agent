@@ -547,7 +547,11 @@ class CLIAgentSetupMixin:
         if tier in STATIC_TIERS:
             try:
                 overrides = resolve_fast_mode_overrides(
-                    route["model"], provider=runtime["provider"], base_url=runtime["base_url"], tier=tier)
+                    route["model"], provider=runtime["provider"], base_url=runtime["base_url"],
+                    requested_provider=runtime.get("requested_provider"), api_mode=runtime.get("api_mode"), tier=tier)
+            except ValueError as exc:
+                import logging
+                logging.getLogger(__name__).warning("Invalid Fast service tier configuration: %s", exc)
             except Exception:
                 pass
         route["request_overrides"] = overrides

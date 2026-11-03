@@ -120,10 +120,17 @@ def delegated_profile_scope(home: Any) -> Iterator[None]:
     """Run the block as profile ``home``: HERMES_HOME override, that profile's secret scope,
     multiplex semantics when it is not this process's own profile, and its terminal policy - the
     binding a multiplexed gateway applies to a routed turn (gateway/AGENTS.md § Profile scope).
-    A no-op for anything but a path (``None``: no profile route) and for the home already in effect."""
+    No profile route (``None``) inherits session declarations; an explicit profile route owns its profile config."""
     from hermes_constants import get_hermes_home, get_routing_process_hermes_home, hermes_home_key
-    if not isinstance(home, (str, Path)) or hermes_home_key(home) == hermes_home_key(get_hermes_home()):
+    from hermes_cli.service_tiers import service_tier_config_scope
+    if not isinstance(home, (str, Path)):
         yield
+        return
+    if hermes_home_key(home) == hermes_home_key(get_hermes_home()):
+        # An explicit profile route owns current profile declarations even when the
+        # chosen home is the parent's; it is not an inherited frozen-session route.
+        with service_tier_config_scope(None):
+            yield
         return
     from agent.secret_scope import (
         reset_multiplex_context, reset_secret_scope, set_multiplex_context, set_secret_scope,
@@ -143,7 +150,8 @@ def delegated_profile_scope(home: Any) -> Iterator[None]:
         if routed:
             stack.callback(reset_multiplex_context, set_multiplex_context(True))
         stack.callback(reset_terminal_scope, install_profile_terminal_scope(home))
-        yield
+        with service_tier_config_scope(None):
+            yield
 
 
 def child_profile_scope(child: Any) -> contextlib.AbstractContextManager:

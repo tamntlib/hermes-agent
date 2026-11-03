@@ -39,7 +39,17 @@ def _fast_route_supports(model: str, runtime: dict, tier: Optional[str] = None) 
     from hermes_cli.models import resolve_fast_mode_overrides
 
     return resolve_fast_mode_overrides(
-        model, provider=runtime.get("provider"), base_url=runtime.get("base_url"), tier=tier) is not None
+        model, provider=runtime.get("provider"), base_url=runtime.get("base_url"),
+        requested_provider=runtime.get("requested_provider"), api_mode=runtime.get("api_mode"), tier=tier) is not None
+
+
+def _fast_ultrafast_offered(model: str, runtime: dict) -> bool:
+    from agent.codex_service_tiers import ultrafast_offered
+
+    return ultrafast_offered(
+        model, provider=runtime.get("provider"), requested_provider=runtime.get("requested_provider"),
+        base_url=runtime.get("base_url"), api_mode=runtime.get("api_mode"), access_token=runtime.get("api_key"),
+    )
 
 
 # /reasoning display-toggle arguments -> show_reasoning value.
@@ -248,6 +258,7 @@ class GatewayModelCommandsMixin:
         )
         self._session_model_overrides[ctx.session_key] = {
             "model": result.new_model, "provider": result.target_provider, "api_key": result.api_key,
+            "requested_provider": result.target_provider,
             "base_url": result.base_url, "api_mode": result.api_mode,
             "request_overrides": dict(result.request_overrides or {}),
             "capabilities": dict(result.runtime_capabilities or {}),
@@ -1017,12 +1028,37 @@ class GatewayModelCommandsMixin:
             return None  # Picker sent — adapter handles the response
         return t("gateway.reasoning.status", level=level, scope=scope, display=display_state)
 
-    def _apply_fast_selection(self, session_key: str, value: str, persist: bool = False) -> str:
-        """Apply a /fast argument (typed or picked) and return the reply."""
+    async def _resolve_fast_command_route(self, source, session_key: str) -> tuple:
+        from gateway.run import _load_gateway_config, _resolve_gateway_model
+
+        user_config = _load_gateway_config()
+        try:
+            return await asyncio.to_thread(
+                self._resolve_session_agent_runtime, source=source, session_key=session_key, user_config=user_config)
+        except ValueError:
+            raise
+        except Exception:
+            logger.debug("Fast route resolution unavailable", exc_info=True)
+            return _resolve_gateway_model(user_config), {}
+
+    async def _apply_fast_selection(
+        self, session_key: str, value: str, persist: bool = False, *, source=None,
+    ) -> str:
+        """Validate the current route before any mutation, including delayed picker callbacks."""
         selection = _FAST_SELECTIONS.get(value)
         if selection is None:
             return t("gateway.fast.unknown_arg", arg=value)
         tier, saved_value, label_key = selection
+        if tier is not None:
+            try:
+                model, runtime = await self._resolve_fast_command_route(source, session_key)
+                if not _fast_route_supports(model, runtime, "ultrafast" if tier == "ultrafast" else "priority"):
+                    key = "gateway.fast.ultrafast_not_supported" if tier == "ultrafast" else "gateway.fast.not_supported"
+                    return t(key, model=model)
+                if tier == "ultrafast" and not _fast_ultrafast_offered(model, runtime):
+                    return t("gateway.fast.ultrafast_not_supported", model=model)
+            except ValueError as exc:
+                return str(exc)
         label = t(label_key) if label_key else value.upper()
         self._service_tier = tier
         from gateway.session_setting_commands import local_live_for_route
@@ -1043,38 +1079,35 @@ class GatewayModelCommandsMixin:
         """Handle /fast — the CLI Priority Processing toggle; session-scoped unless ``--global``
         (persists agent.service_tier, parity with /model)."""
         from agent.fast_mode import FAST_ARG_ALIASES, service_tier_word
-        from gateway.run import _load_gateway_config, _resolve_gateway_model
 
         # The /reasoning parser strips --global (any position) and normalizes unicode dashes.
         args, persist_global = self._parse_reasoning_command_args(event.get_command_args().strip().lower())
-        # Normalized like /model and /reasoning (#30479): the tier override must land under the key
-        # the next turn reads, and the eligibility check must see that turn's route.
         source = await asyncio.to_thread(self._normalize_source_for_session_key, event.source)
         session_key = self._session_key_for_source(source)
-        self._service_tier = self._resolve_session_service_tier(session_key=session_key)
-        user_config = _load_gateway_config()
-        try:
-            # Off the loop: credential resolution can refresh an OAuth token, as the turn does.
-            model, runtime = await asyncio.to_thread(
-                self._resolve_session_agent_runtime, source=source, session_key=session_key, user_config=user_config)
-        except Exception:
-            # No usable route at all (the turn fails too): judge the configured model alone.
-            model, runtime = _resolve_gateway_model(user_config), {}
-        if not _fast_route_supports(model, runtime):
-            return t("gateway.fast.not_supported")
         args = FAST_ARG_ALIASES.get(args, args)
-        from agent.codex_service_tiers import ultrafast_offered
-        ultrafast = ultrafast_offered(model, provider=runtime.get("provider"), base_url=runtime.get("base_url"),
-                                      access_token=runtime.get("api_key"))
-        if args == "ultrafast" and not ultrafast:
-            return t("gateway.fast.ultrafast_not_supported", model=model)
         if args and args != "status":
-            return self._apply_fast_selection(session_key, args, persist=persist_global)
-        mode = service_tier_word(self._service_tier)
+            return await self._apply_fast_selection(session_key, args, persist=persist_global, source=source)
+        try:
+            model, runtime = await self._resolve_fast_command_route(source, session_key)
+            priority = _fast_route_supports(model, runtime, "priority")
+            ultrafast = (_fast_route_supports(model, runtime, "ultrafast")
+                         and _fast_ultrafast_offered(model, runtime))
+        except ValueError as exc:
+            return str(exc)
+        tier = self._resolve_session_service_tier(session_key=session_key)
+        mode = service_tier_word(tier) if (ultrafast if tier == "ultrafast" else priority) else "normal"
         status = {"fast": t("gateway.fast.status_fast"), "normal": t("gateway.fast.status_normal")}.get(mode, mode)
 
+        profile_home = None
+        if getattr(getattr(self, "config", None), "multiplex_profiles", False):
+            profile_home = self._resolve_profile_home_for_source(source)
+
         async def _on_fast_choice(_chat_id: str, value: str) -> str:
-            return self._apply_fast_selection(session_key, value, persist=persist_global)
+            from gateway.run import _profile_runtime_scope
+
+            scope = _profile_runtime_scope(profile_home) if profile_home is not None else contextlib.nullcontext()
+            with scope:
+                return await self._apply_fast_selection(session_key, value, persist=persist_global, source=source)
 
         picker_sent = await self._try_send_choice_picker(
             event,
@@ -1082,7 +1115,8 @@ class GatewayModelCommandsMixin:
             title=t("gateway.fast.picker_title", mode=status),
             choices=[
                 {"value": v, "label": t(f"gateway.fast.choice_{v}"), "is_current": mode == v}
-                for v in ("fast", "normal", "auto", "cold", *(("ultrafast",) if ultrafast else ()))
+                for v in (*(("fast",) if priority else ()), "normal", *(("auto", "cold") if priority else ()),
+                          *(("ultrafast",) if ultrafast else ()))
             ],
             on_choice_selected=_on_fast_choice,
         )

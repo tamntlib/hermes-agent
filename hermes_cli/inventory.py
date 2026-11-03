@@ -545,7 +545,11 @@ def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None
     serving aggregator's detail overrides models.dev (adds ``can_disable_reasoning``). ``supported_efforts``
     is deliberately NOT forwarded — it under-reports levels that work."""
     from agent.codex_service_tiers import daybreak_offered, ultrafast_offered
-    from hermes_cli.models import model_supports_ultrafast, resolve_fast_mode_overrides
+    from hermes_cli.models import resolve_fast_mode_overrides
+    from hermes_cli.config_providers import get_compatible_custom_providers
+
+    custom_entries = {entry.get("provider_key") or entry["name"]: entry
+                      for entry in get_compatible_custom_providers(metadata_config)}
 
     try:
         from agent.models_dev import get_model_capabilities
@@ -571,11 +575,14 @@ def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None
                 except Exception:
                     reasoning = True
 
-            fast = resolve_fast_mode_overrides(
-                model, provider=slug, base_url=row.get("api_url")) is not None
+            route = {"provider": slug, "base_url": row.get("api_url"), "config": metadata_config}
+            custom_entry = custom_entries.get(slug.removeprefix("custom:"))
+            if custom_entry:
+                identity = "custom:" + slug if row.get("is_user_defined") and not slug.startswith("custom:") else slug
+                route.update(requested_provider=identity, api_mode=custom_entry.get("api_mode"))
+            fast = resolve_fast_mode_overrides(model, **route) is not None
             entry: dict[str, Any] = {"fast": fast, "reasoning": reasoning}
-            if fast and model_supports_ultrafast(model) and ultrafast_offered(
-                    model, provider=slug, base_url=row.get("api_url")):
+            if ultrafast_offered(model, **route):
                 entry["ultrafast"] = True
             if not _app_server and daybreak_offered(model, provider=slug, base_url=row.get("api_url")):
                 entry["daybreak"] = True

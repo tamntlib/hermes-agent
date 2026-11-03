@@ -36,6 +36,22 @@ _TOOL_PROGRESS_STYLES = {
 }
 
 
+def _fast_route_context(cli) -> tuple:
+    """Read the route the next CLI turn uses, without provider/URL inference."""
+    agent = getattr(cli, "agent", None)
+    model = getattr(cli, "model", None) or getattr(agent, "model", None)
+    runtime = {}
+    for key in ("provider", "requested_provider", "base_url", "api_mode"):
+        value = getattr(cli, key, getattr(agent, key, None))
+        runtime[key] = value if isinstance(value, str) else None
+    # Before credential setup, auto is not a concrete route; retain model-only discovery.
+    if (not runtime["base_url"] and not runtime["api_mode"]
+            and runtime["provider"] in (None, "", "auto")
+            and runtime["requested_provider"] in (None, "", "auto")):
+        runtime["provider"] = runtime["requested_provider"] = None
+    return model, runtime
+
+
 def _tool_progress_label(mode: str) -> str:
     """Localized ``Tool progress: MODE — detail`` line for /verbose ("" for an unknown mode)."""
     style = _TOOL_PROGRESS_STYLES.get(mode)
@@ -273,16 +289,21 @@ class CLIInfoMixin:
         self._console_print()
 
     def _fast_command_available(self) -> bool:
+        from hermes_cli.models import resolve_fast_mode_overrides
+        from agent.codex_service_tiers import ultrafast_offered_for
+
+        model, runtime = _fast_route_context(self)
         try:
-            from hermes_cli.models import model_supports_fast_mode
-        except Exception:
+            if resolve_fast_mode_overrides(model, **runtime, tier="priority") is not None:
+                return True
+            return (resolve_fast_mode_overrides(model, **runtime, tier="ultrafast") is not None
+                    and ultrafast_offered_for(self, model))
+        except ValueError as exc:
+            logging.getLogger(__name__).warning("Invalid Fast service tier configuration: %s", exc)
             return False
-        agent = getattr(self, "agent", None)
-        return model_supports_fast_mode(getattr(agent, "model", None) or getattr(self, "model", None))
 
     def _command_available(self, slash_command: str) -> bool:
-        if slash_command == "/fast":
-            return self._fast_command_available()
+        # /fast normal and status must remain usable after switching to an ineligible route.
         return True
 
     def show_help(self, arg: str = ""):

@@ -118,7 +118,7 @@ _KNOWN_PROVIDER_KEYS = {
     "name", "api", "url", "base_url", "api_key", "key_env", "api_key_env", "key_cmd",
     "api_mode", "transport", "model", "default_model", "models", "models_discovered",
     "context_length", "rate_limit_delay", "request_timeout_seconds", "stale_timeout_seconds",
-    "discover_models", "extra_body", "extra_headers", "capabilities", "ssl_ca_cert", "ssl_verify",
+    "discover_models", "extra_body", "extra_headers", "capabilities", "service_tiers", "ssl_ca_cert", "ssl_verify",
     "catalog_provider", "session_affinity_header"}
 
 
@@ -267,6 +267,9 @@ def _normalize_custom_provider_entry(
             normalized[field] = entry[field]
     if isinstance(entry.get("extra_body"), dict):
         normalized["extra_body"] = dict(entry["extra_body"])
+    if "service_tiers" in entry:
+        # Presence matters: [] explicitly disables paid tiers instead of inheriting defaults.
+        normalized["service_tiers"] = entry["service_tiers"]
 
     # Per-provider extra HTTP headers may carry credentials — never log them downstream.
     _put("extra_headers", normalize_extra_headers(entry.get("extra_headers")))
@@ -292,7 +295,7 @@ def _custom_provider_entry_to_provider_config(
     provider_entry: dict[str, Any] = {"api": normalized["base_url"]}
     for field in (
         "name", "api_key", "key_env", "key_cmd", "models", "models_discovered", "context_length",
-        "rate_limit_delay", "discover_models", "extra_body", "extra_headers",
+        "rate_limit_delay", "discover_models", "extra_body", "extra_headers", "service_tiers",
         "session_affinity_header", "ssl_ca_cert", "ssl_verify", "catalog_provider"):
         if field in normalized:
             provider_entry[field] = normalized[field]

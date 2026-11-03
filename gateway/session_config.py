@@ -240,8 +240,17 @@ async def model_options(connection, ref, params):
             selected = provider
             if selected == 'custom':
                 from hermes_cli.runtime_provider import canonical_custom_identity
-                selected = canonical_custom_identity(base_url=base_url, config_provider=ctx.current_provider, model=model,
-                                                     requested=getattr(agent, 'requested_provider', None)) or selected
+                from hermes_cli.runtime_provider_custom import session_provider_identity
+                requested = getattr(agent, 'requested_provider', None)
+                if base_url and requested:
+                    identity = session_provider_identity(provider, requested, base_url, model)
+                    # Only the validated live request wins; an endpoint-only sibling guess must
+                    # still pass strict legacy recovery, not borrow a shared route or paid identity.
+                    if identity == requested:
+                        selected = identity
+                if selected == 'custom':
+                    selected = canonical_custom_identity(base_url=base_url, config_provider=ctx.current_provider,
+                                                         model=model) or selected
             return build_model_options_payload(ctx.with_overrides(current_provider=selected,
                 current_model=model, current_base_url=base_url), **{k: params[k] for k in flags & params.keys()})
     return await asyncio.to_thread(discover)

@@ -1142,8 +1142,10 @@ def policy_scope(policy, *, authority=None):
         # session never reads the profile: its side tasks use its own saved section (code defaults only).
         aux_scope = (session_auxiliary_scope(policy.config(authority, secrets=False).get('auxiliary'))
                      if policy.ignore_user_config else contextlib.nullcontext())
+        from hermes_cli.service_tiers import service_tier_config_scope
+        # Paid declarations follow the owning session, independently of live auxiliary preferences.
         with (editor_scope(policy), editor_mcp_scope(authority, policy), aux_scope,
-              policy.client_env_scope()):
+              service_tier_config_scope(policy.config(authority, secrets=False)), policy.client_env_scope()):
             yield
     finally:
         _ACTIVE_POLICY.reset(policy_token)

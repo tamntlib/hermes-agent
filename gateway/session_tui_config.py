@@ -233,28 +233,27 @@ def current_tier(connection, ref, policy):
 def service_tier_options(connection, ref, policy, *, include_ultrafast=True):
     """The session route's speed choices, resolved under its credential scope."""
     from agent.codex_service_tiers import ultrafast_offered
-    from gateway.run import _profile_runtime_scope
+    from gateway.session_authorities import owner_scope
+    from gateway.session_tier_route import tier_route
     from hermes_cli.models import resolve_fast_mode_overrides
-    with _profile_runtime_scope(Path(connection.authority.profile_id)):
+    with owner_scope(connection.authority):
         agent = connection.authority.agent(ref)
-        config, model = policy.effective(connection.authority, secrets=False) if policy else ({}, None)
-        route = config.get('model') or {}
-        provider, base_url = route.get('provider'), route.get('base_url')
+        route = tier_route(connection.authority, policy, agent,
+                           connection.authority.sessions[ref.session_id])
+        model = route.pop('model')
+        if not model:
+            return []
+        access_token = getattr(agent, 'api_key', None)
         if policy is not None and policy.follows_profile:
             from gateway.session_policy import route_launch_key
-            access_token = route_launch_key(connection.authority, policy, config) or route.get('api_key')
-        else:
-            model = getattr(agent, 'model', None) or model
-            provider = getattr(agent, 'provider', None) or provider
-            base_url = getattr(agent, 'base_url', None) or base_url
-            access_token = getattr(agent, 'api_key', None)
-        if not model or resolve_fast_mode_overrides(model, provider=provider, base_url=base_url) is None:
+            config = route.get('config') or {}
+            access_token = route_launch_key(connection.authority, policy, config) or (config.get('model') or {}).get('api_key')
+        priority = resolve_fast_mode_overrides(model, **route, tier='priority') is not None
+        ultrafast = include_ultrafast and ultrafast_offered(model, **route, access_token=access_token)
+        if not priority and not ultrafast:
             return []
-        options = ['normal', 'fast', 'auto', 'cold']
-        if include_ultrafast and ultrafast_offered(model, provider=provider, base_url=base_url,
-                                                   access_token=access_token):
-            options.append('ultrafast')
-        return options
+        return ['normal', *(['fast', 'auto', 'cold'] if priority else []),
+                *(['ultrafast'] if ultrafast else [])]
 
 
 async def _set_fast(connection, ref, policy, value):
@@ -274,7 +273,7 @@ async def _set_fast(connection, ref, policy, value):
         tier = parse_exact_service_tier(raw) or None
     except ValueError:
         raise RuntimeStoreError('invalid_params') from None
-    if tier in STATIC_TIERS:
+    if tier is not None:
         options = await asyncio.to_thread(service_tier_options, connection, ref, policy,
                                           include_ultrafast=tier == 'ultrafast')
         if service_tier_word(tier) not in options:

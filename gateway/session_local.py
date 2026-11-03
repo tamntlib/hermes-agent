@@ -419,19 +419,23 @@ def _reasoning_fields(agent, policy, model, authority=None, override=None):
         return {}
     view = session_runtime_view(agent) if agent is not None else None
     if view is None:
+        from gateway.session_tier_route import tier_route
         from hermes_constants import resolve_reasoning_config
-        effective, next_model = policy.effective(authority, secrets=False)
-        route = effective.get('model') or {}
+        route = tier_route(authority, policy)
+        effective, next_model = route['config'], route['model']
     config = (getattr(view, 'reasoning_config', None) if view is not None
               else override if override is not None else resolve_reasoning_config(effective, next_model or ''))
     tier = (getattr(view, 'service_tier', None) if view is not None
             else parse_service_tier((effective.get('agent') or {}).get('service_tier'))) or ''
     provider = getattr(view, 'provider', None) if view is not None else route.get('provider')
     base_url = getattr(view, 'base_url', None) if view is not None else route.get('base_url')
-    return effort_fields(config, tier, model, provider, base_url, getattr(view, 'api_mode', None))
+    api_mode = getattr(view, 'api_mode', None) if view is not None else route.get('api_mode')
+    requested = getattr(view, 'requested_provider', None) if view is not None else route.get('requested_provider')
+    return effort_fields(config, tier, model, provider, base_url, api_mode, requested,
+                         route['config'] if view is None else None)
 
 
-def effort_fields(config, tier, model, provider, base_url, api_mode=None):
+def effort_fields(config, tier, model, provider, base_url, api_mode=None, requested_provider=None, tier_config=None):
     """Session-info ``reasoning_effort`` / ``_wire`` / ``service_tier`` / ``fast`` for one resolved route."""
     from agent.fast_mode import STATIC_TIERS
     from agent.reasoning_effort import clamp_effort, route_supported_efforts
@@ -445,7 +449,8 @@ def effort_fields(config, tier, model, provider, base_url, api_mode=None):
         wire = str(clamp_effort(effort, route_supported_efforts(provider, model, api_mode)) or '')
     try:
         fast = tier in STATIC_TIERS and resolve_fast_mode_overrides(
-            model, provider=provider or None, base_url=base_url or None, tier=tier) is not None
+            model, provider=provider or None, base_url=base_url or None, tier=tier,
+            requested_provider=requested_provider, api_mode=api_mode, config=tier_config) is not None
     except Exception:  # health: allow BLE001 -- main's _fast_tier_applies gate: unknown means not Fast
         fast = False
     return {'reasoning_effort': effort, 'reasoning_effort_wire': wire, 'service_tier': tier, 'fast': fast}

@@ -204,27 +204,11 @@ def _set_fast(rid, params, key, value, session):
     nv = _FAST_WORDS.get(raw, ("normal" if current_tier in STATIC_TIERS else "fast") if raw in {"", "toggle"} else None)
     if nv is None:
         return _err(rid, 4002, f"unknown fast mode: {value}")
-    overrides = None
-    if nv in ("fast", "ultrafast"):
-        from hermes_cli.models import resolve_fast_mode_overrides
-        if agent is not None:
-            target_model = getattr(agent, "model", None)
-        else:  # a pre-build session may carry a picked model (desktop draft): validate against THAT
-            session_override = (session or {}).get("model_override") or {}
-            target_model = (isinstance(session_override, dict) and session_override.get("model")) or _resolve_model()
-        if not target_model:
-            return _err(rid, 4002, "fast mode is not available without a selected model")
-        overrides = resolve_fast_mode_overrides(target_model, provider=getattr(agent, "provider", None),
-                                                base_url=getattr(agent, "base_url", None),
-                                                tier="ultrafast" if nv == "ultrafast" else None)
-        if overrides is not None and nv == "ultrafast":
-            from agent.codex_service_tiers import ultrafast_offered
-            if not ultrafast_offered(target_model, provider=getattr(agent, "provider", None),
-                                     base_url=getattr(agent, "base_url", None),
-                                     access_token=getattr(agent, "api_key", None)):
-                overrides = None
-        if overrides is None:
-            return _err(rid, 4002, f"{nv} mode is not available for this model")
+    from .service_tiers import validate_selection
+    try:
+        overrides = validate_selection(nv, agent=agent, override=(session or {}).get("model_override"))
+    except ValueError as exc:
+        return _err(rid, 4002, str(exc))
     if session is not None:
         # Session-scoped like `reasoning` (global = `--global` / Settings → Model): writing config.yaml
         # here flipped fast mode for every surface. The create override survives rebuilds; "" pins normal.

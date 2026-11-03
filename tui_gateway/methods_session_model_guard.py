@@ -49,3 +49,14 @@ def create_overrides(params: dict) -> tuple:
     elif "fast" in params:
         service_tier_override = "priority" if is_truthy_value(params.get("fast")) else ""
     return model_override, reasoning_override, service_tier_override
+
+
+def validated_create_overrides(params: dict, build_scope) -> tuple:
+    """Validate explicit create-time tiers in the owning profile before session mutation."""
+    from .service_tiers import validate_selection
+
+    with build_scope:
+        overrides = create_overrides(params)
+        if overrides[2] is not None:
+            validate_selection(overrides[2], override=overrides[0])
+        return overrides

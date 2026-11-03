@@ -417,6 +417,10 @@ def _direct_endpoint_credentials(v: dict, explicit_request_overrides) -> dict:
             from hermes_cli.runtime_provider import resolve_runtime_provider
             runtime = resolve_runtime_provider(requested=v["provider"], target_model=v["model"])
             request_overrides = dict(runtime.get("request_overrides") or {}) or None
+            # An explicitly named custom route keeps its owner through task-tier validation
+            # and child construction; the exact endpoint/protocol gate still decides eligibility.
+            if runtime.get("provider") == "custom" and v["provider"].lower() not in {"custom", "auto"}:
+                provider = v["provider"]
 
         except Exception as exc:
             logger.debug(

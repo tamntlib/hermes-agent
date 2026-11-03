@@ -1277,22 +1277,18 @@ def model_supports_ultrafast(model_id: Optional[str]) -> bool:
 
 
 def resolve_fast_mode_overrides(
-    model_id: Optional[str], *, provider: Optional[str] = None, base_url: Optional[str] = None,
-    tier: Optional[str] = None,
+    model_id: Optional[str], *, provider: Optional[str] = None,
+    requested_provider: Optional[str] = None, base_url: Optional[str] = None,
+    api_mode: Optional[str] = None, tier: Optional[str] = None,
+    config: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any] | None:
-    """Fast/priority request_overrides — ``{"speed": "fast"}`` (Anthropic Fast Mode) or
-    ``{"service_tier": "priority"}`` (OpenAI / xAI Priority Processing) — or None if unsupported.
-    ``tier="ultrafast"`` asks for OpenAI Ultrafast instead: ``{"service_tier": "ultrafast"}`` on an
-    Ultrafast model, None elsewhere (never a silent downgrade to a different paid tier).
-    With ``provider``/``base_url`` the route is gated too (``_fast_mode_route_supported``) so proxies
-    never see the params. Single fast-mode gate for ``/fast`` and ``agent.fast_mode`` windows."""
-    if not model_supports_fast_mode(model_id):
-        return None
-    if (provider or base_url) and not _fast_mode_route_supported(model_id, provider, base_url):
-        return None
-    if tier == "ultrafast":
-        return {"service_tier": "ultrafast"} if model_supports_ultrafast(model_id) else None
-    return {"speed": "fast"} if _is_anthropic_fast_model(model_id) else {"service_tier": "priority"}
+    """Paid-tier overrides for the exact route; undeclared routes keep first-party policy."""
+    from hermes_cli.service_tiers import resolve_service_tier_overrides
+
+    return resolve_service_tier_overrides(
+        model_id, provider=provider, requested_provider=requested_provider, base_url=base_url,
+        api_mode=api_mode, tier=tier, config=config,
+    )
 
 
 def _model_dedup_key(model_id: str) -> str:
