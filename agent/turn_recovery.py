@@ -1385,15 +1385,21 @@ def abort_turn_on_interrupt(
     # already-executed tool result. Strip only that request-local scaffold before
     # closing, so this exit owner can persist its specific interrupt reason.
     agent._drop_trailing_empty_response_scaffolding(messages)
-    close_interrupted_tool_sequence(messages, interrupt_text, stopped=True)
+    result = {
+        "final_response": interrupt_text, "messages": messages, "api_calls": api_call_count,
+        "completed": False, "interrupted": True,
+    }
+    # A tool-tail closer publishes immediately, rather than merely flushing interim
+    # context. Native finals must settle before that append, with interrupt policy intact.
+    if any(not item.get("delivered") for item in (getattr(agent, "_responses_image_artifacts", None) or {}).values()):
+        from agent.turn_finalizer import settle_final_output
+        settle_final_output(agent, result)
+    close_interrupted_tool_sequence(messages, result["final_response"], stopped=True)
     agent._persist_session(messages, conversation_history)
     # The turn was stopped, not rebuilt: a pending steer was aimed at this turn's next
     # tool iteration, which will no longer happen — drop it (hard-cancel semantics).
     agent.clear_interrupt(hard_cancel=True)
-    return {
-        "final_response": interrupt_text, "messages": messages, "api_calls": api_call_count,
-        "completed": False, "interrupted": True,
-    }
+    return result
 
 
 def interruptible_backoff_sleep(
