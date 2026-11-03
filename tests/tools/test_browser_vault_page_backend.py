@@ -81,3 +81,33 @@ def test_secret_failure_never_echoes_the_script(page):
     raw = browser_vault_tool.browser_vault_fill(meta.id)
     out = json.loads(raw)
     assert out["success"] is False and SECRET not in raw
+
+
+def test_registry_fill_keeps_the_exact_task_and_redacts_later_reads(page, monkeypatch):
+    from agent.redact import redact_sensitive_text
+    from tools.registry import registry
+
+    fake, meta = page
+    tasks = []
+    evaluate = fake.evaluate
+
+    def tracked(task_id, expression, *, secret):
+        tasks.append(task_id)
+        return evaluate(task_id, expression, secret=secret)
+
+    monkeypatch.setattr(fake, "evaluate", tracked)
+    raw = registry.dispatch("browser_vault", {"action": "fill", "handle": meta.id}, task_id="raw-task")
+    assert json.loads(raw)["success"] is True, raw
+    assert tasks and set(tasks) == {"raw-task"}
+    assert SECRET not in raw
+    assert SECRET not in redact_sensitive_text(f"Password: {SECRET}", force=True)
+
+
+def test_page_exception_sentinel_is_a_secret_refusal(page, monkeypatch):
+    from tools import browser_vault_tool as vault
+
+    fake, _ = page
+    monkeypatch.setattr(fake, "evaluate", lambda *args, **kwargs: vault._PAGE_FILL_FAILED)
+    result = vault._eval_js_secret("raw-task", json.dumps(SECRET))
+    assert result["success"] is False
+    assert SECRET not in json.dumps(result)

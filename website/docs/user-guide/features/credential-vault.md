@@ -168,6 +168,7 @@ inside the page immediately before the write. With the Camofox browser plugin,
 which has no CDP endpoint, the same checks run and the fill goes to the Camofox
 tab through its REST evaluate endpoint, only when `CAMOFOX_URL` is loopback or
 HTTPS.
+Camofox server plugins that subscribe to `tab:evaluate` can see the fill script.
 
 **Does not:** protect against the page itself. Once a password is typed into a
 site, that site (and any script it runs) has it, exactly as when you type it

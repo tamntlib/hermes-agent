@@ -126,7 +126,7 @@ def _ensure_supervisor(task_id: str):
 
 
 def _eval_js_secret(task_id: str, expression: str) -> dict[str, Any]:
-    """Evaluate a SECRET-BEARING JS expression. Supervisor CDP-WS only.
+    """Evaluate a SECRET-BEARING JS expression. Supervisor CDP-WS (or Camofox REST) only.
 
     Fails closed: there is deliberately NO subprocess path, because that would
     place the expression — and therefore the credential bytes — in argv,
