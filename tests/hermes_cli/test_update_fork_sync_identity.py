@@ -1,4 +1,6 @@
-"""The fork sync acts on ONE upstream commit (review R6 m2).
+"""Historical fork-sync helper compatibility: one upstream commit (review R6 m2).
+
+The current origin-only updater never calls this helper; these tests protect historical callers.
 
 ``_sync_with_upstream_if_needed`` fetches ``refs/remotes/upstream/main`` and fast-forwards to it. The
 short name ``upstream/main`` also names a LOCAL branch of that name (git resolves ``refs/heads``

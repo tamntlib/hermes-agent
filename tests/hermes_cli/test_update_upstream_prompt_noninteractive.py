@@ -1,12 +1,13 @@
-"""The fork-upstream prompt must never block a non-interactive update (#60240).
+"""Historical fork-sync helper compatibility (#60240), not the origin-only updater.
 
-`_sync_with_upstream_if_needed` asks "Add official repo as 'upstream' remote?"
+The current updater never calls this helper. Historical callers of
+`_sync_with_upstream_if_needed` ask "Add official repo as 'upstream' remote?"
 on fork checkouts with no upstream remote. In unattended contexts (CI, cron,
 the desktop updater hand-off) stdin is open but nobody answers, so a bare
 ``input()`` blocks forever. These tests pin the gate: under ``assume_yes`` or
 a non-TTY stdio pair the prompt is skipped as a decline WITHOUT persisting the
-skip marker or touching git remotes, and both update call sites forward the
-interaction state.
+skip marker or touching git remotes. Current command behavior is covered by
+`test_update_origin_only.py` and `test_update_target_identity.py`.
 """
 
 from types import SimpleNamespace

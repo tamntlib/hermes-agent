@@ -15,7 +15,6 @@ import pytest
 
 from hermes_cli import main as cli_main, update_cmd, update_receipt
 from hermes_cli.update_inventory import UpdatePlan
-from hermes_cli.update_cmd import _sync_with_upstream_if_needed
 
 
 def git(root, *args):
@@ -96,116 +95,91 @@ def _publish_stable(monkeypatch, t):
         'stable', 'stable', repository, commit=t.wanted, version='1.1.0'))
 
 
-@pytest.mark.parametrize('case', ['main', 'explicit', 'missing', 'no-move', 'wrong-branch',
-                                'fork-no-upstream', 'fork-upstream', 'fork-upstream-push-ok',
-                                'fork-upstream-wrong-branch', 'fork-upstream-reverted',
-                                'fork-late', 'fork-late-push-ok', 'fork-late-wrong-branch',
-                                'fork-late-reverted', 'check-main',
-                                'check-explicit', 'check-missing', 'check-upstream'])
+@pytest.mark.parametrize('case', [
+    'main', 'explicit', 'missing', 'no-move', 'wrong-branch',
+    'fork-no-upstream', 'fork-upstream', 'fork-late', 'origin-unreachable',
+    'check-main', 'check-explicit', 'check-missing', 'check-upstream', 'check-origin-unreachable',
+])
 def test_branch_update_uses_real_refs_and_completion_request(update_tree, monkeypatch, case, capsys):
     t = update_tree
     git(t.clone, 'checkout', '-q', 'main')
     t.args.channel = 'main'
     t.args.gateway = True
     t.args.check = case.startswith('check-')
-    monkeypatch.setattr(cli_main, '_sync_with_upstream_if_needed', _sync_with_upstream_if_needed)
     if case in {'explicit', 'check-explicit'}:
         git(t.origin, 'branch', 'chosen', t.wanted)
         t.args.branch = 'chosen'
     if case in {'missing', 'check-missing'}:
         t.args.branch = 'absent'
+    has_upstream = case in {'fork-upstream', 'fork-late', 'check-upstream',
+                            'origin-unreachable', 'check-origin-unreachable'}
     if case.startswith('fork-') or case == 'check-upstream':
-        # Early sync starts level with origin; late sync first consumes origin.
-        git(t.origin, 'reset', '--hard', t.wanted if case.startswith('fork-late') else t.base)
-        if case.startswith(('fork-upstream', 'fork-late')) or case == 'check-upstream':
-            upstream = t.origin.parent / 'upstream'
-            git(t.origin.parent, 'clone', '-q', str(t.origin), str(upstream))
-            git(upstream, 'reset', '--hard', t.newer)
-            git(t.clone, 'remote', 'add', 'upstream', str(upstream))
-            if case.endswith('push-ok'):
-                git(t.origin, 'config', 'receive.denyCurrentBranch', 'updateInstead')
+        git(t.origin, 'reset', '--hard', t.wanted if case == 'fork-late' else t.base)
+    upstream = t.origin.parent / 'upstream'
+    if has_upstream:
+        git(t.origin.parent, 'clone', '-q', str(t.origin), str(upstream))
+        git(upstream, 'reset', '--hard', t.newer)
+        git(t.clone, 'remote', 'add', 'upstream', str(upstream))
+    if case.endswith('origin-unreachable'):
+        git(t.clone, 'remote', 'set-url', 'origin', str(t.origin.parent / 'unreachable.git'))
     local = t.clone / '.gitignore'
     local_work = local.read_bytes() + b'# local work\n'
-    if case.startswith('fork-late'):
+    if case == 'fork-late':
         local.write_bytes(local_work)
+    origin_before = git(t.origin, 'rev-parse', 'HEAD')
     run = subprocess.run
-    pushes = []
-
-    def _upstream_sha():
-        # The fork sync merges the commit it resolved from refs/remotes/upstream/main (m2).
-        found = run(['git', 'rev-parse', '-q', '--verify', 'refs/remotes/upstream/main'], cwd=t.clone,
-                    capture_output=True, text=True, encoding='utf-8')
-        return found.stdout.strip() or '<no upstream>'
 
     def fault(command, *args, **kwargs):
         assert Path(command[0]).name.lower() in {'git', 'git.exe'} or command[0] == sys.executable, command
-        assert Path(kwargs['cwd']).resolve() in {t.clone, t.origin}, command
-        # The upstream sync's tree move (`pull upstream main` on older updaters, a local merge of
-        # the commit resolved from `refs/remotes/upstream/main` now, m2) vs the origin fast-forward.
-        upstream_move = ('pull' in command or 'merge' in command) and (
-            any(arg == 'upstream' or arg.startswith(('upstream/', 'refs/remotes/upstream/')) for arg in command)
-            or ('merge' in command and _upstream_sha() in command))
-        if 'merge' in command and '--ff-only' in command and not upstream_move:
+        assert Path(kwargs['cwd']).resolve() in {t.clone, t.origin, upstream}, command
+        assert 'pull' not in command, command
+        assert 'push' not in command or 'stash' in command, command  # local stash push is not publication
+        if 'fetch' in command:
+            assert 'origin' in command, command
+        if 'merge' in command and '--ff-only' in command:
             if case == 'no-move':
                 return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
             result = run(command, *args, **kwargs)
-            if case in {'wrong-branch', 'fork-upstream-wrong-branch'}:
+            if case == 'wrong-branch':
                 run(['git', 'checkout', '-qb', 'wrong'], cwd=t.clone, check=True, capture_output=True)
-            if case == 'fork-upstream-reverted':
-                run(['git', 'reset', '--hard', t.base], cwd=t.clone, check=True, capture_output=True)
             return result
-        result = run(command, *args, **kwargs)
-        if upstream_move and case.startswith('fork-late'):
-            if case.endswith('wrong-branch'):
-                run(['git', 'checkout', '-qb', 'wrong'], cwd=t.clone, check=True, capture_output=True)
-            if case.endswith('reverted'):
-                run(['git', 'reset', '--hard', t.base], cwd=t.clone, check=True, capture_output=True)
-        if 'push' in command and 'origin' in command:
-            pushes.append(result.returncode)
-        return result
+        return run(command, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, 'run', fault)
     fails = case in {'missing', 'check-missing', 'no-move', 'wrong-branch',
-                     'fork-upstream-wrong-branch', 'fork-upstream-reverted',
-                     'fork-late-wrong-branch', 'fork-late-reverted'}
+                     'origin-unreachable', 'check-origin-unreachable'}
     if fails:
         with pytest.raises(SystemExit) as error:
             cli_main.cmd_update(t.args)
         assert error.value.code == 1
         assert t.requests == []
-        if case.startswith('fork-late'):
-            assert git(t.clone, 'show', 'stash@{0}:.gitignore') == local_work.decode().strip()
-            assert local.read_bytes() != local_work
     else:
         cli_main.cmd_update(t.args)
         if t.args.check:
             assert t.requests == []
             assert git(t.clone, 'rev-parse', 'HEAD') == t.base
             output = capsys.readouterr().out
-            assert ('absent' if case == 'check-missing' else 'update') in output.lower()
-            if case == 'check-upstream':
-                assert git(t.clone, 'rev-parse', 'upstream/main') == t.newer
+            assert ('Already up to date' if case == 'check-upstream' else 'Update available') in output
         else:
             request, = t.requests
             assert request['assume_yes'] is True
             assert request['gateway_mode'] is True
-            expected = t.base if case == 'fork-no-upstream' else t.wanted if case == 'explicit' else t.newer
+            expected = (t.base if case in {'fork-no-upstream', 'fork-upstream'}
+                        else t.wanted if case in {'explicit', 'fork-late'} else t.newer)
             assert git(t.clone, 'rev-parse', 'HEAD') == expected
             assert request['source'] == str(t.clone)
-            if case.startswith(('fork-upstream', 'fork-late')):
-                assert request['expected_sha'] == expected
-                output = capsys.readouterr().out
-                assert 'Code did not move' not in output
-                assert 'Already up to date' not in output
-                origin_before = t.wanted if case.startswith('fork-late') else t.base
-                assert git(t.origin, 'rev-parse', 'HEAD') == (t.newer if case.endswith('push-ok') else origin_before)
-                assert pushes and all((rc == 0) is case.endswith('push-ok') for rc in pushes)
-                if case.startswith('fork-late'):
-                    assert local.read_bytes() == local_work
-                    assert not git(t.clone, 'stash', 'list')
+            assert request['expected_sha'] == expected
+            if case in {'fork-no-upstream', 'fork-upstream'}:
+                assert request['completion_message'] == '✓ Already up to date!'
             if case == 'fork-no-upstream':
-                assert 'official repo not checked' in request['completion_message']
                 assert git(t.clone, 'remote') == 'origin'
+            if case == 'fork-late':
+                assert local.read_bytes() == local_work
+                assert not git(t.clone, 'stash', 'list')
+    assert git(t.origin, 'rev-parse', 'HEAD') == origin_before
+    if has_upstream:
+        assert git(upstream, 'rev-parse', 'HEAD') == t.newer
+        assert git(t.clone, 'for-each-ref', '--format=%(refname)', 'refs/remotes/upstream') == ''
 
 
 @pytest.mark.parametrize('server', ['sha', 'fetch-refused', 'at-release', 'ahead-release', 'explicit-branch'])
@@ -395,40 +369,26 @@ def test_stable_zip_consumes_the_same_commit_through_the_real_swap(update_tree, 
         server.server_close()
 
 
-@pytest.mark.parametrize('sync_phase', ['origin', 'early', 'late', 'late-other-branch'])
+@pytest.mark.parametrize('target', ['origin', 'upstream', 'upstream-noop'])
 @pytest.mark.parametrize('dirty', [False, True])
-def test_update_syntax_failure_restores_pre_update_head(update_tree, monkeypatch, capsys, sync_phase, dirty):
+def test_update_validates_origin_not_unselected_upstream(update_tree, monkeypatch, capsys, target, dirty):
     t = update_tree
     git(t.clone, 'checkout', '-q', 'main')
     t.args.channel = 'main'
-    monkeypatch.setattr(cli_main, '_sync_with_upstream_if_needed', _sync_with_upstream_if_needed)
-    if sync_phase != 'origin':
-        upstream = t.origin.parent / 'upstream'
-        git(t.origin.parent, 'clone', '-q', str(t.origin), str(upstream))
-        git(t.clone, 'remote', 'add', 'upstream', str(upstream))
-        if sync_phase == 'early':
-            git(t.origin, 'reset', '--hard', t.base)
-        remote = upstream
-    else:
+    if target == 'origin':
         remote = t.origin
+    else:
+        remote = t.origin.parent / 'upstream'
+        git(t.origin.parent, 'clone', '-q', str(t.origin), str(remote))
+        git(t.clone, 'remote', 'add', 'upstream', str(remote))
+        if target == 'upstream-noop':
+            git(t.origin, 'reset', '--hard', t.base)
     bad = remote / 'hermes_cli' / 'config.py'
     bad.parent.mkdir()
     bad.write_text('def broken(:\n', encoding='utf-8')
     git(remote, 'add', 'hermes_cli/config.py')
     git(remote, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
         '-c', 'commit.gpgsign=false', 'commit', '-qm', 'invalid syntax')
-    unexpected_head = git(remote, 'rev-parse', 'HEAD')
-    if sync_phase == 'late-other-branch':
-        def switch_after_sync(*args, **kwargs):
-            try:  # the broken upstream target is now refused (raised) before its move (review G1)
-                return _sync_with_upstream_if_needed(*args, **kwargs)
-            finally:
-                git(t.clone, 'checkout', '-qb', 'unexpected')
-                switched.append(git(t.clone, 'rev-parse', 'HEAD'))
-
-        switched = []
-
-        monkeypatch.setattr(cli_main, '_sync_with_upstream_if_needed', switch_after_sync)
     local = t.clone / '.gitignore'
     staged = local.read_bytes() + b'# staged local work\n'
     unstaged = staged + b'# unstaged local work\n'
@@ -437,40 +397,26 @@ def test_update_syntax_failure_restores_pre_update_head(update_tree, monkeypatch
         git(t.clone, 'add', '.gitignore')
         local.write_bytes(unstaged)
         (t.clone / 'notes.txt').write_bytes(b'untracked local work\n')
-    with pytest.raises(SystemExit) as error:
-        cli_main.cmd_update(t.args)
-    assert error.value.code == 1
-    assert not t.requests
-    output = capsys.readouterr().out
-    if sync_phase == 'late-other-branch':
-        # The broken upstream commit never landed; the unexpected branch keeps the HEAD it was cut at.
-        assert git(t.clone, 'rev-parse', 'unexpected') == switched[0] != unexpected_head
-        assert git(t.clone, 'branch', '--show-current') == 'unexpected'
-        assert not (t.clone / 'hermes_cli/config.py').exists()
-        assert "checkout is on 'unexpected'" in output
-        assert 'Rolling back' not in output
-    else:
-        # Origin's own target is refused before HEAD moves (the commit point's preflight); an
-        # upstream sync's target is refused before ITS move, and the update rolls back (review G1).
-        assert ('The update target has a syntax error' if sync_phase == 'origin'
-                else 'has a syntax error in a critical file; it was not merged') in output
+    if target == 'origin':
+        with pytest.raises(SystemExit) as error:
+            cli_main.cmd_update(t.args)
+        assert error.value.code == 1
+        assert not t.requests
+        assert 'The update target has a syntax error' in capsys.readouterr().out
         assert git(t.clone, 'rev-parse', 'HEAD') == t.base
-        assert not (t.clone / 'hermes_cli' / 'config.py').exists()
-    if sync_phase == 'origin' and dirty:
-        # Refused before the autostash too: the local work never left the tree, index included.
-        assert not git(t.clone, 'stash', 'list')
-        assert local.read_bytes() == unstaged
-        assert git(t.clone, 'show', ':.gitignore') == staged.decode().strip()
-        assert (t.clone / 'notes.txt').read_bytes() == b'untracked local work\n'
-        return
-    assert not git(t.clone, 'status', '--porcelain')
-    assert bool(git(t.clone, 'stash', 'list')) is dirty
+    else:
+        cli_main.cmd_update(t.args)
+        request, = t.requests
+        assert request['expected_sha'] == (t.base if target == 'upstream-noop' else t.newer)
+        assert git(t.clone, 'rev-parse', 'HEAD') == request['expected_sha']
+        assert git(t.clone, 'for-each-ref', '--format=%(refname)', 'refs/remotes/upstream') == ''
+    assert not (t.clone / 'hermes_cli' / 'config.py').exists()
+    assert not git(t.clone, 'stash', 'list')
     if dirty:
-        assert git(t.clone, 'show', 'stash@{0}^2:.gitignore') == staged.decode().strip()
-        assert git(t.clone, 'show', 'stash@{0}:.gitignore') == unstaged.decode().strip()
-        assert git(t.clone, 'show', 'stash@{0}^3:notes.txt') == 'untracked local work'
-        git(t.clone, 'stash', 'apply', '--index')
         assert local.read_bytes() == unstaged
-        assert git(t.clone, 'show', ':.gitignore') == staged.decode().strip()
+        if target == 'origin':  # preflight refused before the stash: staging is untouched
+            assert git(t.clone, 'show', ':.gitignore') == staged.decode().strip()
         assert (t.clone / 'notes.txt').read_bytes() == b'untracked local work\n'
+    else:
+        assert not git(t.clone, 'status', '--porcelain')
 

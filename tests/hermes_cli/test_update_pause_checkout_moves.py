@@ -1,11 +1,10 @@
 """Every checkout-writing step binds the paused gateways' tree gate first (#132338 R3, thread 5).
 
 The Windows pause records what "the tree before this update" was, and the gate that lets paused
-gateways start holds them while git may have left a half-written tree at an unmoved HEAD. Only the
-principal pull recorded its target, so a failure in an EARLIER step (the switch onto an existing
-local target branch, a fork's early upstream sync) was judged against whatever refs a later fetch
-left, and a failure in a LATER step (the upstream sync after a successful pull) had no baseline at
-its starting HEAD at all: both torn trees were admitted.
+gateways start holds them while git may have left a half-written tree at an unmoved HEAD. The
+principal pull and branch switch bind their targets; upstream must never start a second move,
+even when the legacy sync_upstream argument is passed. An upstream-only tree-write failure
+must not hold the paused gateways after a successful origin update or an origin no-op.
 
 Real git (local repositories and a bare "upstream"), real update steps, real durable pause record
 and gate. git's mid-move failure is real too: a read-only directory, as an unprivileged user.
@@ -119,7 +118,7 @@ def test_a_torn_first_branch_switch_stays_held_after_a_ref_only_fetch(repo, monk
     assert gate(repo) is False, "a torn switch was admitted once a fetch moved the refs"
 
 
-def test_a_torn_early_upstream_sync_stays_held_after_a_ref_only_fetch(repo, tmp_path, monkeypatch):
+def test_noop_never_starts_an_upstream_tree_move(repo, tmp_path, monkeypatch):
     a = commit(repo, "A", **{"a.py": "A=1\n", "locked__z.py": "Z=1\n"})
     b = commit(repo, "B", **{"a.py": "A=2\n", "locked__z.py": "Z=2\n"})
     bare_upstream(repo, tmp_path, b)
@@ -131,14 +130,14 @@ def test_a_torn_early_upstream_sync_stays_held_after_a_ref_only_fetch(repo, tmp_
         update_cmd._prepare_checkout_for_update(
             ["git"], "main", "main", is_fork=True, assume_yes=True, gateway_mode=False,
             gw_input_fn=None, switch_branch=False, _windows_gateway_resume=token)
-    assert git(repo, "rev-parse", "HEAD") == a and (repo / "a.py").read_text() == "A=2\n", "fixture: not torn"
-    git(tmp_path / "upstream.git", "update-ref", "refs/heads/main", a)  # upstream moves on (here: back)
-    git(repo, "fetch", "-q", "upstream", "+refs/heads/main:refs/remotes/upstream/main")  # a later real fetch
-    assert gate(repo) is False, "a torn upstream sync was admitted once a fetch moved the refs"
+    assert git(repo, "rev-parse", "HEAD") == a
+    assert (repo / "a.py").read_text() == "A=1\n"
+    assert git(repo, "for-each-ref", "--format=%(refname)", "refs/remotes/upstream") == ""
+    assert gate(repo) is True
 
 
 @pytest.mark.parametrize("second_move", ["torn", "refused", "complete"])
-def test_a_second_move_is_gated_from_the_head_the_first_one_reached(repo, tmp_path, monkeypatch, second_move):
+def test_origin_update_never_attempts_a_second_upstream_move(repo, tmp_path, monkeypatch, second_move):
     commit(repo, "A", **{"a.py": "A=1\n", "locked__z.py": "Z=1\n", "notes.txt": "mine\n"})
     o = commit(repo, "O", **{"origin.py": "O=1\n"})
     # Refused: upstream also touches the user's file, which the user edits again after the update.
@@ -157,11 +156,8 @@ def test_a_second_move_is_gated_from_the_head_the_first_one_reached(repo, tmp_pa
         update_cmd._pull_updates(
             ["git"], "main", None, prompt_for_restore=False, gw_input_fn=None, discard_local_changes=False,
             keep_stash=False, sync_upstream=True, assume_yes=True, _windows_gateway_resume=token)
-    head = git(repo, "rev-parse", "HEAD")
-    if second_move == "torn":
-        assert head == o and (repo / "a.py").read_text() == "A=2\n", "fixture: not torn"
-        assert gate(repo) is False, "the failed second move's torn tree was admitted at the first move's HEAD"
-    else:
-        assert head == (o if second_move == "refused" else u)
-        (repo / "notes.txt").write_text("my later edit\n", encoding="utf-8")  # life goes on after the update
-        assert gate(repo) is True, "a move that left the tree whole held the paused set"
+    assert git(repo, "rev-parse", "HEAD") == o != u
+    assert (repo / "a.py").read_text() == "A=1\n"
+    assert git(repo, "for-each-ref", "--format=%(refname)", "refs/remotes/upstream") == ""
+    (repo / "notes.txt").write_text("my later edit\n", encoding="utf-8")
+    assert gate(repo) is True, "the origin update left the tree whole"

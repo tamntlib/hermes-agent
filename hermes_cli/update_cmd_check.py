@@ -139,26 +139,13 @@ def tracking_refspec(remote: str, branch: str) -> str:
     return f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}"
 
 
-def _fetch(git_cmd: list[str], root: Path, depth_args: list[str], remote: str, branch: str):
-    print(f"→ Fetching from {remote}...")
-    return _git(
-        git_cmd, root, ["fetch", *depth_args, remote, tracking_refspec(remote, branch)],
-        **_uc()._no_prompt_git_kwargs())
-
-
 def fetch_compare_branch(git_cmd: list[str], root: Path, branch: str, depth_args: list[str]):
     """Fetch only ``branch`` and return ``(fetch_result, compare_ref)``.
 
     A bare ``git fetch <remote>`` pulls every ref, and this repo has thousands of auto-generated
-    branches. ``main`` prefers upstream as the canonical reference; other branches go straight
-    to origin, because a fork's branch usually has no upstream counterpart.
+    branches. Every branch follows origin, including forks with an upstream remote:
+    upstream synchronization is an explicit developer operation, not an updater fallback.
     """
-    if branch == "main":
-        # A local probe (~6 ms) spares non-fork installs a failed network fetch (~0.3-1 s).
-        if _git(git_cmd, root, ["remote", "get-url", "upstream"]).returncode == 0:
-            fetch_result = _fetch(git_cmd, root, depth_args, "upstream", branch)
-            if fetch_result.returncode == 0:
-                return fetch_result, f"upstream/{branch}"
     from hermes_cli.gitlock import fetch_with_partial_clone_recovery
     # Marking the unmarked packs clears the git 2.53+ partial-clone pack-objects crash (#124272).
     print("→ Fetching from origin...")
@@ -201,8 +188,9 @@ def report_shallow_verdict(git_cmd: list[str], root: Path, compare_branch: str) 
         return
     from hermes_cli.config import recommended_update_command
     from hermes_cli.source_check import _github_compare_behind
+    from hermes_cli.source_releases import source_repository
 
-    counted = _github_compare_behind(head_sha, target_sha)
+    counted = _github_compare_behind(head_sha, target_sha, repository=source_repository(git_cmd, root))
     if counted == 0:
         # Local commits on top of the remote tip — not behind.
         print("✓ Already up to date.")
@@ -239,12 +227,12 @@ def select_apply_target(args, branch: str, request: dict, *, git_cmd, stop) -> t
 
     from hermes_cli.config import require_readable_config_before_write
     from hermes_cli.release_channels import retrying_reads
-    from hermes_cli.source_releases import resolve_source_target
+    from hermes_cli.source_releases import resolve_source_target, source_repository
     from hermes_cli.update_channel import channel_record, rides_default_channel
     from hermes_cli.update_cmd_common import _record_stop
 
     if getattr(args, "branch", None):
-        return f"origin/{branch}", None, False, None
+        return f"origin/{branch}", None, False, source_repository(git_cmd, _uc()._m().PROJECT_ROOT)
     root = _uc()._m().PROJECT_ROOT
     selected = _uc()._update_run_channel(args)
     original = deepcopy(channel_record(require_readable_config_before_write(
