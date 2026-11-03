@@ -1,0 +1,48 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+    steps:
+      - name: Merge latest upstream release
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_TYPE" == branch ]] || {
+            echo '::error::Select a branch, not a tag, for upstream synchronization.' >&2
+            exit 1
+          }
+          upstream=$(gh api "repos/$GITHUB_REPOSITORY" --jq '.parent.full_name')
+          release=$(gh api "repos/$upstream/releases/latest")
+          tag=$(jq -er '
+            select(.draft == false and .prerelease == false)
+            | .tag_name | select(type == "string")
+            | select(test("\\Av(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\z"))
+          ' <<< "$release") || {
+            echo '::error::Latest upstream release must be published, non-prerelease, and tagged vX.Y.Z.' >&2
+            exit 1
+          }
+          encoded_tag=$(jq -rn --arg tag "$tag" '$tag | @uri')
+          sha=$(gh api "repos/$upstream/commits/$encoded_tag" --jq '.sha')
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo '::error::Upstream release tag did not resolve to a full commit SHA.' >&2
+            exit 1
+          }
+          result=$(gh api --include --method POST "repos/$GITHUB_REPOSITORY/merges" \
+            -f "base=$GITHUB_REF_NAME" -f "head=$sha")
+          read -r _ status _ <<< "$result"
+          case "$status" in
+            201) echo "Merged $upstream $tag ($sha) into $GITHUB_REPOSITORY:$GITHUB_REF_NAME." ;;
+            204) echo "Already up to date: $GITHUB_REPOSITORY:$GITHUB_REF_NAME contains $tag ($sha)." ;;
+            *) echo "::error::Unexpected merge status: $status" >&2; exit 1 ;;
+          esac
