@@ -39,6 +39,7 @@ class TaskRoute:
     label: Optional[str] = None
     backend: str = "default"
     error: Optional[str] = None
+    runtime_kwargs: Optional[dict[str, Any]] = None
 
     def report(self) -> Optional[dict[str, Any]]:
         """The ``route`` a backend-routed task's result carries (None for the default backend's unlabelled route)."""
@@ -242,11 +243,14 @@ def _resolve_route(route: dict[str, Any], parent_agent: Any, backend: str) -> Ta
     if route.get("profile"):
         return replace(_profile_route(_profile_home(route["profile"])), backend=backend)
     from tools.delegate_tool import _resolve_delegation_credentials  # the facade is the patch seam
+    from tools.delegate_tool_config import resolve_task_runtime
+    from tools.delegate_tool_tuning import task_service_tier
     creds = _resolve_delegation_credentials(route, parent_agent)
-    if route.get("service_tier") not in (None, ""):
-        from tools.delegate_tool_tuning import task_service_tier
-        creds = {**creds, **task_service_tier(str(route["service_tier"]), creds, parent_agent)}
-    return TaskRoute(creds, route, route.get("reasoning_effort"), None, None, backend)
+    runtime = resolve_task_runtime(parent_agent, creds, route, route.get("reasoning_effort"))
+    if route.get("service_tier") is not None:
+        creds = {**creds, **task_service_tier(route["service_tier"], creds, parent_agent, runtime=runtime)}
+    return TaskRoute(creds, route, route.get("reasoning_effort"), None, None, backend,
+                     runtime_kwargs=runtime)
 
 
 def _route_to_task_route(route: dict[str, Any], parent_agent: Any, cache: dict[str, TaskRoute],
@@ -328,12 +332,15 @@ def resolve_task_routes(task_list: list[dict[str, Any]], config: Mapping[str, An
     except DelegationRouteError as exc:
         return [], str(exc)
     declared = _declared_parameters(provider, config)
+    parent_tier = getattr(parent_agent, "service_tier", None)
     cache: dict[str, TaskRoute] = {}
     routes: list[TaskRoute] = []
     for i, task in enumerate(task_list):
         try:
             route = _route_one(provider, declared, i, task, config)
             _check_backend_effort(i, route, config)
+            if not route.get("profile") and route.get("service_tier") is None:
+                route = {**route, "service_tier": "" if parent_tier is None else parent_tier}
             routes.append(_route_to_task_route(route, parent_agent, cache, config, provider.name))
         except ValueError as exc:  # DelegationRouteError, the credential resolver's and the tier check's refusals
             routes.append(TaskRoute({}, {}, backend=provider.name, error=str(exc)))

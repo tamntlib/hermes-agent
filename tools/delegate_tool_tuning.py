@@ -46,14 +46,18 @@ def _offered_tier_overrides(tier: str, model: Any, provider: Any, base_url: Any,
     return fast
 
 
-def task_service_tier(word: str, creds: dict[str, Any], parent_agent) -> dict[str, Any]:
+def task_service_tier(word: str, creds: dict[str, Any], parent_agent, *, runtime=None) -> dict[str, Any]:
     """Creds keys for a per-task speed tier on the child's resolved route; a tier the route can't serve raises.
     ``task_tier_overrides`` is re-applied to the built child by :func:`pin_child_service_tier`."""
     from agent.fast_mode import STATIC_TIERS, parse_exact_service_tier
+    if not isinstance(word, str):
+        raise ValueError("service_tier must be a string: normal, fast, or ultrafast.")
     try:
         tier = parse_exact_service_tier(word)
     except ValueError:
         tier = None
+    if tier in ("auto", "cold"):
+        raise ValueError(f"Bounded service_tier '{word}' cannot inherit a parent's paid window; select normal, fast, or ultrafast.")
     if tier is None or (tier and tier not in STATIC_TIERS):
         raise ValueError(f"Unknown service_tier '{word}'. Use normal, fast, or ultrafast.")
     # Same bundle rule as _resolve_child_runtime: a pinned provider/endpoint owns the route, else the parent's.
@@ -65,6 +69,9 @@ def task_service_tier(word: str, creds: dict[str, Any], parent_agent) -> dict[st
     requested = (creds.get("requested_provider") or creds.get("provider")) if pinned else getattr(
         parent_agent, "requested_provider", None)
     api_mode = creds.get("api_mode") if pinned else getattr(parent_agent, "api_mode", None)
+    if runtime is not None:
+        provider, model, base_url, api_key, requested, api_mode = (
+            runtime.get(key) for key in ("provider", "model", "base_url", "api_key", "requested_provider", "api_mode"))
     base = creds.get("request_overrides")
     if base is None and not creds.get("provider"):
         base = getattr(parent_agent, "request_overrides", None)
@@ -77,7 +84,7 @@ def task_service_tier(word: str, creds: dict[str, Any], parent_agent) -> dict[st
                 f"service_tier '{word}' is not available for model '{model}' on provider '{provider}'. "
                 f"Omit service_tier or choose a model/provider that offers it."
             )
-    return {"request_overrides": {**without_service_tier(base), **fast}, "service_tier": tier or None,
+    return {"request_overrides": {**without_service_tier(base), **fast}, "service_tier": tier,
             "task_tier_overrides": fast}
 
 

@@ -573,6 +573,20 @@ def _child_reasoning(parent_agent, delegation_cfg: dict, route_effort: Any) -> A
     return child_reasoning
 
 
+def resolve_task_runtime(parent_agent, creds, routing_cfg, reasoning_effort=None):
+    """Reuse native builder routing once for an ordinary task's admission and construction."""
+    from tools.delegate_tool import _load_config, _resolve_child_runtime
+    parent_key = getattr(parent_agent, "api_key", None)
+    if not parent_key and hasattr(parent_agent, "_client_kwargs"):
+        parent_key = parent_agent._client_kwargs.get("api_key")
+    return _resolve_child_runtime(
+        parent_agent, _load_config(), parent_key, model=creds.get("model"),
+        override_provider=creds.get("provider"), override_base_url=creds.get("base_url"),
+        override_api_key=creds.get("api_key"), override_api_mode=creds.get("api_mode"),
+        override_acp_command=creds.get("command"), override_acp_args=creds.get("args"),
+        routing_cfg=routing_cfg, override_reasoning_effort=reasoning_effort)
+
+
 def _resolve_child_runtime(
     parent_agent, delegation_cfg: dict, parent_api_key: Any, *, model: Optional[str], override_provider: Optional[str],
     override_base_url: Optional[str], override_api_key: Optional[str], override_api_mode: Optional[str],
