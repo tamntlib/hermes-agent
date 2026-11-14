@@ -1747,6 +1747,7 @@ class _AnthropicCompletionsAdapter:
                 tool_choice = choice_type if choice_type in {"auto", "required", "none"} else None
         elif not isinstance(tool_choice, str):
             tool_choice = None
+        from agent.auxiliary_service_tiers import native_compression_fast
         anthropic_kwargs = build_anthropic_kwargs(
             model=model, messages=kwargs.get("messages", []), tools=kwargs.get("tools"),
             max_tokens=max_tokens, reasoning_config=reasoning_cfg, tool_choice=tool_choice,
@@ -1754,6 +1755,7 @@ class _AnthropicCompletionsAdapter:
             # Portal routes on ``anthropic/<slug>`` ids and replays signed thinking
             # keyed off base_url; omitting it breaks Portal model resolution.
             base_url=self._base_url,
+            fast_mode=native_compression_fast(_RELAY_AUX_CALL_CONTEXT.get() or {}, model, self._base_url),
         )
         # Opus 4.7+ rejects non-default temperature/top_p/top_k; build_anthropic_kwargs
         # also strips these as a safety net — keep both layers.
@@ -2617,6 +2619,9 @@ def _relay_auxiliary_metadata(
     attempt_count = int(context.get("attempt_count") or 0)
     context["attempt_count"] = attempt_count + 1
     provider_name = str(provider or context.get("provider") or "auxiliary")
+    # The protocol adapter needs the physical attempt's provider, not the primary
+    # route, when applying native compression Fast eligibility on a fallback.
+    context["stream_provider"] = provider_name
     model_name = str(context.get("model") or "unknown")
     return provider_name, model_name, {
         "api_mode": str(api_mode or context.get("api_mode") or "chat_completions"),
@@ -3612,6 +3617,7 @@ def _prepare_same_provider_retry(
         temperature=temperature, max_tokens=max_tokens, tools=tools, timeout=effective_timeout,
         extra_body=effective_extra_body, reasoning_config=reasoning_config,
         base_url=retry_base or resolved_base_url, task=task,
+        api_mode=_aux_client_api_mode(retry_client, resolved_api_mode),
     )
     # Preserve per-request attribution headers (a profile's ``request_headers``) across the rebuilt-client
     # retry: dropping them would let a recovery retry silently lose capability gating (#60293).
@@ -3875,7 +3881,8 @@ def _fallback_request_kwargs(
     fb_kwargs = _build_call_kwargs(
         destination.provider, destination.model, fallback_messages,
         temperature=temperature, max_tokens=fallback_max_tokens, tools=fallback_tools, timeout=effective_timeout,
-        extra_body=fallback_extra_body, reasoning_config=reasoning_config, base_url=destination.base_url, task=task)
+        extra_body=fallback_extra_body, reasoning_config=reasoning_config, base_url=destination.base_url, task=task,
+        api_mode=destination.api_mode)
     return fb_kwargs
 
 
@@ -3898,6 +3905,7 @@ def _plan_fallback_candidate(
         )
         effective_timeout = fb_timeout
     destination = _fallback_destination(task, fb_client, fb_model, fb_label)
+    destination = destination._replace(api_mode=_aux_client_api_mode(fb_client, destination.api_mode))
     task_config = _get_auxiliary_task_config(task) if task == "compression" else {}
     fallback_entry = _fallback_chain_entry(task, fb_label) or {}
     common = dict(
@@ -6550,79 +6558,13 @@ def _merge_aux_extra_body(
     return merged_extra
 
 
-def _build_call_kwargs(
-    provider: str, model: str, messages: list, temperature: Optional[float] = None,
-    max_tokens: Optional[int] = None, tools: Optional[list] = None, timeout: float = 30.0,
-    extra_body: Optional[dict] = None, reasoning_config: Optional[dict] = None,
-    base_url: Optional[str] = None, task: Optional[str] = None,
-    no_progress_timeout: Optional[float] = None,
-) -> dict:
+def _build_call_kwargs(*args, **kwargs) -> dict:
     """Build kwargs for .chat.completions.create() with model/provider adjustments.
     ``no_progress_timeout`` is a Codex-Responses-only extra (consumed by
     ``_CodexCompletionsAdapter.create``'s ``**kwargs`` catch-all); callers must only pass it
     when the resolved client is a ``CodexAuxiliaryClient`` — real SDK clients don't accept it."""
-    kwargs: dict[str, Any] = {"model": model, "messages": messages, "timeout": timeout}
-    if no_progress_timeout is not None:
-        kwargs["no_progress_timeout"] = no_progress_timeout
-    effective_base = base_url or (_current_custom_base_url() if provider == "custom" else "")
-    extra_body = _with_custom_endpoint_extra_body(extra_body, provider, model, effective_base)
-    # Per-model fixed/omitted temperature, then Opus 4.7+ sampling bans: it rejects any
-    # non-default temperature/top_p/top_k, so drop silently rather than 400 when the aux model flips.
-    fixed_temperature = _fixed_temperature_for_model(model, effective_base, provider)
-    if fixed_temperature is OMIT_TEMPERATURE:
-        temperature = None  # strip — let server choose
-    elif fixed_temperature is not None:
-        temperature = fixed_temperature
-    if temperature is not None:
-        from agent.anthropic_adapter import _forbids_sampling_params
-        if not _forbids_sampling_params(model):
-            kwargs["temperature"] = temperature
-    provider_norm = str(provider or "").strip().lower()
-    if max_tokens is not None and _forwards_max_tokens(provider, provider_norm, model, effective_base, task):
-        kwargs.update(auxiliary_max_tokens_param(max_tokens, model=model))  # picks max_completion_tokens where needed
-    if tools:
-        kwargs["tools"] = _dedupe_tool_names(tools, provider, model)
-    # Provider profiles are the source of truth for reasoning wire shapes (top-level, nested body,
-    # or extra_body.reasoning); providers without a reasoning-aware profile keep the generic
-    # ``extra_body.reasoning`` fallback. Clamp Hermes-internal levels (``ultra``) to the
-    # OpenAI-compat wire ONCE here, before either path sees the config — the same entry clamp the
-    # main transport applies (#89503); MoA aggregator/reference and aux calls 400'd without it (#112010).
-    from agent.reasoning_effort import clamp_reasoning_config
-    from agent.auxiliary_reasoning_floor import known_reasoning_floor
-    if isinstance(extra_body, dict):
-        task_reasoning = extra_body.get("reasoning")
-        if isinstance(task_reasoning, dict) and "enabled" in task_reasoning:
-            extra_body = dict(extra_body)
-            extra_body.pop("reasoning")
-            if reasoning_config is None:
-                reasoning_config = task_reasoning
-    reasoning_config = clamp_reasoning_config(known_reasoning_floor(reasoning_config, provider_norm, effective_base, model, task))
-    projection = _project_provider_profile(provider, provider_norm, model, effective_base, reasoning_config, data_use_requirement(messages))
-    kwargs.update(projection.top_level)
-    merged_extra = _merge_aux_extra_body(extra_body, projection, reasoning_config, provider_norm)
-    if "response_format" in merged_extra:
-        from agent.auxiliary_structured_output import without_unsupported_response_format
-        merged_extra = without_unsupported_response_format(merged_extra, provider_norm, effective_base, model, task)
-    if merged_extra:
-        kwargs["extra_body"] = merged_extra
-    # Anthropic Messages adapters take reasoning via a private kwarg that plain OpenAI SDK clients
-    # would reject; Portal Claude is dual-wire, so include it only when the catalog id selects
-    # /v1/messages. A profile declaring api_mode=anthropic_messages (commandcode-anthropic) is on
-    # that wire regardless of URL shape — once it overrides build_api_kwargs_extras the generic
-    # ``extra_body.reasoning`` fallback the adapter used to read is gone, so this is the adapter's
-    # only path. _wrap_transport wraps such providers on the same declaration.
-    if reasoning_config and isinstance(reasoning_config, dict):
-        raw_base = base_url or ""
-        if (
-            provider_norm == "anthropic" or projection.messages_wire or _nous_on_messages_wire(provider_norm, model)
-            or _endpoint_speaks_anthropic_messages(raw_base) or _is_anthropic_compat_endpoint(provider_norm, raw_base)
-        ):
-            kwargs["_reasoning_config"] = dict(reasoning_config)
-    # Conversation affinity (OpenCode relay, opt-in custom-provider header) — same key as the main
-    # turn so compression/title/vision calls stay on the conversation's warm backend.
-    from agent.opencode_affinity import merge_session_affinity_headers
-    return merge_session_affinity_headers(kwargs, provider, base_url, _runtime_main_value("session_id") or None)
-
+    from agent.auxiliary_request_kwargs import build_call_kwargs
+    return build_call_kwargs(*args, **kwargs)
 
 def _validate_llm_response(
     response: Any, task: Optional[str] = None, provider: Optional[str] = None, base_url: Optional[str] = None,
@@ -7311,6 +7253,18 @@ class _PreparedAuxRequest(NamedTuple):
     base_info: str
 
 
+def _aux_client_api_mode(client: Any, configured: Optional[str] = None) -> str:
+    if isinstance(client, (CodexAuxiliaryClient, AsyncCodexAuxiliaryClient)):
+        return "codex_responses"
+    if isinstance(client, (AnthropicAuxiliaryClient, AsyncAnthropicAuxiliaryClient)):
+        return "anthropic_messages"
+    from openai import AsyncOpenAI
+    # Recovery can replace a protocol wrapper with a plain Chat SDK client.
+    if isinstance(client, (_load_openai_cls(), AsyncOpenAI)):
+        return "chat_completions"
+    return configured or "chat_completions"
+
+
 def _prepare_aux_request(
     task: Optional[str], *, provider: Optional[str], model: Optional[str], base_url: Optional[str],
     api_key: Optional[str], main_runtime: dict[str, Any], messages: list,
@@ -7366,7 +7320,8 @@ def _prepare_aux_request(
         request_provider, final_model, messages, temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
         reasoning_config=reasoning_config, base_url=base_info or resolved_base_url, task=task,
-        no_progress_timeout=no_progress_timeout)
+        no_progress_timeout=no_progress_timeout,
+        api_mode=_aux_client_api_mode(client, resolved_api_mode))
     if extra_headers:
         kwargs["extra_headers"] = dict(extra_headers)
     # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
@@ -8008,7 +7963,19 @@ def _ladder_step_call(
 ) -> tuple[str, tuple, dict[str, Any]]:
     """Resolve a ladder step into ``(kind, args, kwargs)`` for the sync/async performer."""
     if step.kind == "call":
-        return "call", step.args, dict(provider=req.resolved_provider, api_mode=req.resolved_api_mode)
+        client, kwargs = step.args
+        if candidate_kwargs.get("task") == "compression":
+            from agent.auxiliary_service_tiers import apply_compression_service_tier
+            # Nous healing/refresh can change model, endpoint or protocol without
+            # rebuilding kwargs. Authorize the actual send, not the failed route.
+            kwargs = apply_compression_service_tier(
+                kwargs, _get_auxiliary_task_config("compression"),
+                provider=_effective_provider_for_client(client, req.resolved_provider),
+                model=kwargs.get("model"),
+                base_url=str(getattr(client, "base_url", "") or ""),
+                api_mode=_aux_client_api_mode(client, req.resolved_api_mode),
+            )
+        return "call", (client, kwargs), dict(provider=req.resolved_provider, api_mode=req.resolved_api_mode)
     if step.kind == "retry_same_provider":
         retry_provider, retry_model, repairs = step.args
         return "retry", (), dict(retry_kwargs, resolved_provider=retry_provider, resolved_model=retry_model,
