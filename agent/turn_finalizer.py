@@ -529,6 +529,13 @@ def apply_llm_output_transform(
         return final_response, transformed, pre_transform
     if not final_response:
         return final_response, False, None
+    # A recovery seam (e.g. the held continuation ceiling) may be the first
+    # authoritative transform. It must see native refs from every earlier round.
+    from types import SimpleNamespace
+    from agent.responses_images import append_pending_response_images
+    message = SimpleNamespace(content=final_response, provider_data={})
+    append_pending_response_images(agent, message)
+    final_response = message.content
     if platform is None:
         platform = getattr(agent, "platform", None) or ""
     transformed, pre_transform = False, None
@@ -570,11 +577,32 @@ def settle_held_final(agent, result: Any) -> None:
     other exit (provider errors, retry exhaustion, interrupts, compression failures, ...) returns its
     text through ``run_conversation``, which calls this, so no path hands the user text the plugin
     did not see first, and a failed transform yields the withheld notice."""
-    if getattr(agent, "_hold_stream", False) is not True or not isinstance(result, dict):
+    if not isinstance(result, dict):
         return
     text, turn_id = result.get("final_response"), getattr(agent, "_current_turn_id", "") or ""
     recorded = getattr(agent, "_llm_output_transform", None)
-    if not isinstance(text, str) or not text or (isinstance(recorded, tuple) and recorded[:1] == (turn_id,)):
+    if not isinstance(text, str) or not text:
+        return
+    pending = any(not item.get("delivered") for item in (getattr(agent, "_responses_image_artifacts", None) or {}).values())
+    if pending:
+        from agent.responses_images import preserve_recovery_response_images
+
+        refused = result.get("failure_reason") == "content_policy_blocked"
+        # The owner drops a deterministic policy refusal's turn. Settle delivery on a
+        # disposable transcript, never append that final to the clean replay history.
+        messages = [] if refused else result["messages"]
+        final, transformed, pre_transform = preserve_recovery_response_images(
+            agent, messages, text, "interrupted" if result.get("interrupted") else "error",
+        )
+        if getattr(agent, "_hold_stream", False) is True and result.get("error") == text:
+            result["error"] = final
+        result.update(final_response=final, response_transformed=transformed, pre_transform_response=pre_transform)
+        if not refused:
+            agent._persist_session(messages, None)
+        return
+    if isinstance(recorded, tuple) and recorded[:1] == (turn_id,):
+        return
+    if getattr(agent, "_hold_stream", False) is not True:
         return
     final, transformed, _ = apply_llm_output_transform(agent, text, turn_id=turn_id)
     if result.get("error") == text:  # keep the mirror an error card reads
@@ -720,6 +748,13 @@ def finalize_turn(
         final_response, _recovered_from_stream = _recover_final_from_stream(
             agent, final_response, interrupted, failed
         )
+        # Budget/failure exits bypass finish_text_response: merge pending native refs
+        # BEFORE the first transform. A settled transform forbids original reattachment.
+        if any(not item.get("delivered") for item in (getattr(agent, "_responses_image_artifacts", None) or {}).values()):
+            from agent.responses_images import preserve_recovery_response_images
+            final_response, _, _ = preserve_recovery_response_images(
+                agent, messages, final_response or "", "interrupted" if interrupted else "incomplete",
+            )
         # Recovery paths (stream-recovered / prior-turn text) reach here with a response no
         # earlier seam transformed; the normal text turn already did this before its flush and
         # gets the recorded outcome back. Either way the tail close below writes the text the
@@ -751,7 +786,14 @@ def finalize_turn(
         )
 
     _platform = getattr(agent, "platform", None) or ""
-    _response_transformed = False
+    # Native persistence can already have settled a held stop. Export only its receipt,
+    # without another hook invocation or the withheld pre-transform text.
+    recorded = getattr(agent, "_llm_output_transform", None)
+    _response_transformed = bool(
+        interrupted and getattr(agent, "_hold_stream", False) is True
+        and isinstance(recorded, tuple) and len(recorded) == 3
+        and recorded[0] == turn_id and recorded[1]
+    )
     _pre_transform_response = None
     if final_response and not interrupted:
         final_response, _response_transformed, _pre_transform_response = _apply_output_hooks(
