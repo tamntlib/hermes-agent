@@ -102,7 +102,7 @@ async def test_owner_picker_keeps_route_identity_separate_from_defaults_and_paid
         if state != 'live':
             from hermes_cli.models import resolve_fast_mode_overrides
             assert resolve_fast_mode_overrides(
-                agent.model, provider=agent.provider, base_url=agent.base_url) is None
+                agent.model, provider=agent.provider, base_url=agent.base_url) == {"service_tier": "priority"}
         assert (home / 'config.yaml').read_bytes() == before
         refused = await owner.dispatch({'id': 'foreign', 'method': 'model.options', 'params': {
             'session_id': sid, 'profile': 'foreign'}})

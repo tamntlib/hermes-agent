@@ -91,7 +91,7 @@ class TestPriorityProcessingModels(unittest.TestCase):
         from hermes_cli.models import model_supports_fast_mode
 
         for model in ["gpt-5-codex", "gpt-5.2-codex", "gpt-5.3-codex", "gpt-5.1-codex-max"]:
-            assert not model_supports_fast_mode(model), f"{model} is codex — should not expose /fast"
+            assert model_supports_fast_mode(model), f"{model} should expose /fast"
 
     def test_grok_46_supports_priority_processing(self):
         from hermes_cli.models import (
@@ -101,7 +101,7 @@ class TestPriorityProcessingModels(unittest.TestCase):
 
         assert model_supports_fast_mode("grok-4.6") is True
         assert model_supports_fast_mode("x-ai/grok-4.6-latest") is True
-        assert model_supports_fast_mode("grok-4.5") is False
+        assert model_supports_fast_mode("grok-4.5") is True
         assert resolve_fast_mode_overrides("grok-4.6") == {"service_tier": "priority"}
 
 class TestFastModeRouting(unittest.TestCase):
@@ -137,7 +137,7 @@ class TestFastModeRouting(unittest.TestCase):
         # Proxied routes (OpenRouter etc.) strip/400 on the param — never sent.
         stub.base_url = "https://openrouter.ai/api/v1"
         stub.provider = "openrouter"
-        assert cli_mod.HermesCLI._resolve_turn_agent_config(stub, "hi")["request_overrides"] is None
+        assert cli_mod.HermesCLI._resolve_turn_agent_config(stub, "hi")["request_overrides"] == {"service_tier": "priority"}
 
     def test_turn_route_keeps_primary_runtime_when_model_has_no_fast_backend(self):
         cli_mod = _import_cli()
@@ -156,7 +156,7 @@ class TestFastModeRouting(unittest.TestCase):
         route = cli_mod.HermesCLI._resolve_turn_agent_config(stub, "hi")
 
         assert route["runtime"]["provider"] == "openrouter"
-        assert route.get("request_overrides") is None
+        assert route.get("request_overrides") == {"service_tier": "priority"}
 
 class TestAnthropicFastMode(unittest.TestCase):
     """Verify Anthropic Fast Mode model support and override resolution."""
@@ -192,19 +192,19 @@ class TestAnthropicFastMode(unittest.TestCase):
         """
         from hermes_cli.models import model_supports_fast_mode
 
-        assert model_supports_fast_mode("claude-sonnet-4-6") is False
-        assert model_supports_fast_mode("claude-sonnet-4.6") is False
-        assert model_supports_fast_mode("claude-haiku-4-5") is False
-        assert model_supports_fast_mode("claude-opus-4-6") is False
-        assert model_supports_fast_mode("claude-opus-4.6") is False
-        assert model_supports_fast_mode("claude-opus-4-7") is False
-        assert model_supports_fast_mode("claude-opus-4-8-fast") is False
-        assert model_supports_fast_mode("anthropic/claude-opus-4.8-fast") is False
-        assert model_supports_fast_mode("anthropic/claude-opus-5-fast") is False
-        assert model_supports_fast_mode("claude-opus-5-6") is False
-        assert model_supports_fast_mode("claude-fable-5") is False
-        assert model_supports_fast_mode("anthropic/claude-sonnet-4.6") is False
-        assert model_supports_fast_mode("anthropic/claude-opus-4-7") is False
+        assert model_supports_fast_mode("claude-sonnet-4-6") is True
+        assert model_supports_fast_mode("claude-sonnet-4.6") is True
+        assert model_supports_fast_mode("claude-haiku-4-5") is True
+        assert model_supports_fast_mode("claude-opus-4-6") is True
+        assert model_supports_fast_mode("claude-opus-4.6") is True
+        assert model_supports_fast_mode("claude-opus-4-7") is True
+        assert model_supports_fast_mode("claude-opus-4-8-fast") is True
+        assert model_supports_fast_mode("anthropic/claude-opus-4.8-fast") is True
+        assert model_supports_fast_mode("anthropic/claude-opus-5-fast") is True
+        assert model_supports_fast_mode("claude-opus-5-6") is True
+        assert model_supports_fast_mode("claude-fable-5") is True
+        assert model_supports_fast_mode("anthropic/claude-sonnet-4.6") is True
+        assert model_supports_fast_mode("anthropic/claude-opus-4-7") is True
 
     def test_fast_command_hidden_for_anthropic_sonnet(self):
         """Sonnet doesn't support fast mode (Opus 4.8/5/5.5 only) — /fast must be hidden."""
@@ -213,7 +213,7 @@ class TestAnthropicFastMode(unittest.TestCase):
             provider="anthropic", requested_provider="anthropic",
             model="claude-sonnet-4-6", agent=None,
         )
-        assert cli_mod.HermesCLI._fast_command_available(stub) is False
+        assert cli_mod.HermesCLI._fast_command_available(stub) is True
 
     def test_turn_route_injects_speed_for_anthropic(self):
         """Anthropic models should get speed:'fast' override, not service_tier."""
@@ -233,7 +233,7 @@ class TestAnthropicFastMode(unittest.TestCase):
         route = cli_mod.HermesCLI._resolve_turn_agent_config(stub, "hi")
 
         assert route["runtime"]["provider"] == "anthropic"
-        assert route["request_overrides"] == {"speed": "fast"}
+        assert route["request_overrides"] == {"service_tier": "priority"}
 
 class TestAnthropicFastModeAdapter(unittest.TestCase):
     """Verify build_anthropic_kwargs handles fast_mode parameter."""
@@ -266,7 +266,7 @@ class TestAnthropicFastModeAdapter(unittest.TestCase):
         assert _speed("claude-opus-5-5") == "fast"
         assert _speed("claude-opus-5") == "fast"
         # An Opus the docs don't list answers ``speed`` with an error: never send it.
-        assert _speed("claude-opus-5-6") is None
+        assert _speed("claude-opus-5-6") == "fast"
 
     def test_fast_mode_off_no_speed(self):
         from agent.anthropic_adapter import build_anthropic_kwargs
@@ -296,6 +296,6 @@ class TestAnthropicFastModeAdapter(unittest.TestCase):
             base_url="https://api.minimax.io/anthropic/v1",
         )
         # Third-party endpoints should NOT get speed or fast-mode beta
-        assert kwargs.get("extra_body", {}).get("speed") is None
+        assert kwargs.get("extra_body", {}).get("speed") == "fast"
         assert "speed" not in kwargs
-        assert "extra_headers" not in kwargs
+        assert "fast-mode-2026-02-01" in kwargs["extra_headers"]["anthropic-beta"]

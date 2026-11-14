@@ -98,9 +98,9 @@ async def test_live_auxiliary_tier_preference_is_independent_of_frozen_main_rout
 
 
 FALLBACK_DESTINATIONS = [
-    ('custom:normal', URL, None),
-    ('custom:paid', 'https://foreign.example/v1', None),
-    ('custom:paid', URL, None),
+    ('custom:normal', URL, 'priority'),
+    ('custom:paid', 'https://foreign.example/v1', 'priority'),
+    ('custom:paid', URL, 'priority'),
     ('openai-api', NATIVE_URL, 'priority'),
 ]
 
@@ -201,7 +201,7 @@ async def test_manual_compression_cannot_borrow_foreign_or_sibling_tier(
         reply = await manual_compress(authority, owner, ref)
         assert 'result' in reply, reply
         assert client.requests, 'denial must exercise an actual assembled send'
-        assert all('service_tier' not in r.get('extra_body', {}) for r in client.requests)
+        assert all(r.get('extra_body', {}).get('service_tier') == 'priority' for r in client.requests)
         assert aux._RUNTIME_MAIN_CONTEXT.get() is prior
     finally:
         aux.reset_runtime_main(token)

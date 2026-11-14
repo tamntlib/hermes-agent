@@ -1113,20 +1113,20 @@ auxiliary:
     service_tier: priority  # fast is an alias for priority
 ```
 
-Hermes uses upstream native Fast eligibility on the actual auxiliary destination:
-the model and first-party provider/endpoint must support the selected tier.
-Named custom providers and proxies cannot grant paid-tier eligibility through
-`fast_mode` declarations. An unsupported selection adds no tier override and does
-not prevent compression. Ultrafast is supported only for native-eligible models
-and routes, with no downgrade to Priority.
+An explicit Priority/Fast selection is sent to the actual auxiliary destination
+without a model, provider, or endpoint eligibility check. The backend is responsible
+for supporting that selection; `fast_mode` declarations are not required.
+Ultrafast retains native model and route eligibility checks, with no downgrade
+to Priority.
 Priority/Ultrafast controls do not use the chat session's bounded `auto`/`cold`
 windows; those values are invalid here.
 
 The policy is evaluated again for credential retries and every fallback,
 including `auxiliary.compression.fallback_chain` and top-level
-`fallback_providers`. A fallback that does not pass the shared gate receives
-no processing-tier override. OpenAI-compatible Responses/Chat routes use
-`service_tier`; supported Anthropic Messages Priority routes use `speed: fast`
+`fallback_providers`. Explicit Priority is projected for each destination;
+a fallback that does not pass Ultrafast eligibility receives no Ultrafast
+override. OpenAI-compatible Responses/Chat routes use `service_tier`;
+Anthropic Messages Priority routes use `speed: fast`
 and the Fast-mode beta. Anthropic Ultrafast is not supported.
 
 Omitting this key or setting it to `null` preserves existing raw `extra_body`

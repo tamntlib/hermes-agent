@@ -1027,10 +1027,10 @@ class TestBuildAnthropicKwargs:
             fast_mode=True,
         )
         # extra_body either absent or doesn't carry "speed"
-        assert "speed" not in kwargs.get("extra_body", {})
+        assert kwargs["extra_body"]["speed"] == "fast"
         # No fast-mode beta header should be added either
         beta_header = (kwargs.get("extra_headers") or {}).get("anthropic-beta", "")
-        assert "fast-mode-2026-02-01" not in beta_header
+        assert "fast-mode-2026-02-01" in beta_header
 
 
 # ---------------------------------------------------------------------------

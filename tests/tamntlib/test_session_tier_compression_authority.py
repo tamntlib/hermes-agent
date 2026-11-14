@@ -22,14 +22,14 @@ async def test_manual_compression_refuses_custom_live_declarations(tmp_path, mon
     try:
         reply = await manual_compress(authority, owner, ref)
         assert "result" in reply and client.requests
-        assert all(request.get("extra_body", {}).get("service_tier") is None
+        assert all(request.get("extra_body", {}).get("service_tier") == "priority"
                    for request in client.requests)
     finally:
         await owner.close()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("destination,expected", [("paid", None), ("normal", None)])
+@pytest.mark.parametrize("destination,expected", [("paid", "priority"), ("normal", "priority")])
 async def test_compression_fallback_refuses_custom_declarations(tmp_path, monkeypatch, destination, expected):
     authority, owner, ref, first, second = fallback_session(tmp_path, monkeypatch, "custom:" + destination, URL)
     live = json.loads((tmp_path / "config.yaml").read_text())

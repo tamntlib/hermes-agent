@@ -1229,12 +1229,7 @@ def _strip_vendor_prefix(model_id: str) -> str:
 
 def model_supports_fast_mode(model_id: Optional[str]) -> bool:
     """Return whether Hermes should expose the /fast toggle for this model."""
-    from agent.model_metadata import is_grok_46_family
-
-    return (
-        _is_anthropic_fast_model(model_id)
-        or _is_openai_fast_model(model_id)
-        or is_grok_46_family(str(model_id or "")))
+    return bool(model_id)
 
 
 def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
@@ -1288,11 +1283,11 @@ def resolve_fast_mode_overrides(
     never see the params. Single fast-mode gate for ``/fast`` and ``agent.fast_mode`` windows."""
     if not model_supports_fast_mode(model_id):
         return None
-    if (provider or base_url) and not _fast_mode_route_supported(model_id, provider, base_url):
+    if tier == "ultrafast" and (provider or base_url) and not _fast_mode_route_supported(model_id, provider, base_url):
         return None
     if tier == "ultrafast":
         return {"service_tier": "ultrafast"} if model_supports_ultrafast(model_id) else None
-    return {"speed": "fast"} if _is_anthropic_fast_model(model_id) else {"service_tier": "priority"}
+    return {"service_tier": "priority"}
 
 
 def _model_dedup_key(model_id: str) -> str:

@@ -70,7 +70,7 @@ def test_capability_omission_overrides_legacy_paid_fields(config, entry):
     config["providers"]["paid"] = entry
     body = aux._build_call_kwargs("custom:paid", MODEL, [], base_url=URL, task="compression",
         extra_body={"service_tier": "priority", "speed": "fast", "keep": 7})["extra_body"]
-    assert body == {"keep": 7}
+    assert body == {"keep": 7, "service_tier": "priority"}
 
 
 @pytest.mark.parametrize("value", [None, "missing"])
@@ -118,7 +118,7 @@ def test_real_call_refuses_custom_named_paid_authority(config, monkeypatch, asyn
         asyncio.run(aux.async_call_llm(**kw))
     else:
         aux.call_llm(**kw)
-    assert "service_tier" not in client.requests[0].get("extra_body", {})
+    assert client.requests[0]["extra_body"]["service_tier"] == "priority"
 
 
 @pytest.mark.parametrize("async_mode", [False, True])
@@ -144,8 +144,8 @@ def test_custom_anthropic_cannot_receive_managed_speed_or_beta(config, monkeypat
         aux.call_llm(**kw)
     body, headers = captured[0].get("extra_body", {}), captured[0].get("extra_headers", {})
     assert "service_tier" not in body
-    assert "speed" not in body
-    assert "fast-mode-2026-02-01" not in headers.get("anthropic-beta", "")
+    assert body.get("speed") == ("fast" if tier == "priority" else None)
+    assert ("fast-mode-2026-02-01" in headers.get("anthropic-beta", "")) is (tier == "priority")
 
 
 @pytest.mark.parametrize("async_mode", [False, True])
@@ -172,8 +172,8 @@ def test_credential_retry_reprojects_named_identity_and_actual_model(config, mon
         asyncio.run(aux.async_call_llm(**kw))
     else:
         aux.call_llm(**kw)
-    assert "service_tier" not in first.requests[0].get("extra_body", {})
-    assert "service_tier" not in retry.requests[0].get("extra_body", {})
+    assert first.requests[0]["extra_body"]["service_tier"] == "priority"
+    assert retry.requests[0]["extra_body"]["service_tier"] == "priority"
 
 
 @pytest.mark.parametrize("async_mode", [False, True])
@@ -195,7 +195,7 @@ def test_fallback_request_uses_its_protocol_and_not_primary_projection(config, m
         asyncio.run(aux._call_fallback_candidate_async(aux.AsyncAnthropicAuxiliaryClient(client), "claude-opus-4-6", "custom:paid", classify_as=classify_as, **kw))
     else:
         aux._call_fallback_candidate_sync(client, "claude-opus-4-6", "custom:paid", **kw)
-    assert "speed" not in captured[0]["extra_body"]
+    assert captured[0]["extra_body"]["speed"] == "fast"
     assert "service_tier" not in captured[0]["extra_body"]
     assert captured[0]["extra_body"]["keep"] == 7
 
@@ -266,8 +266,8 @@ def test_actual_fallback_chain_rechecks_destination_capability(
         asyncio.run(aux.async_call_llm(**kw))
     else:
         aux.call_llm(**kw)
-    assert "service_tier" not in first.requests[0].get("extra_body", {})
-    assert "service_tier" not in second.requests[0]["extra_body"]
+    assert first.requests[0]["extra_body"]["service_tier"] == "priority"
+    assert second.requests[0]["extra_body"]["service_tier"] == "priority"
     assert second.requests[0]["extra_body"]["keep"] == 7
 
 
@@ -277,7 +277,7 @@ def test_same_endpoint_sibling_and_unnamed_route_cannot_borrow_paid_authority(co
         kwargs = aux._build_call_kwargs(provider, MODEL, [], base_url=URL,
             task="compression", api_mode="chat_completions",
             extra_body={"service_tier": "priority", "keep": 7})
-        assert kwargs["extra_body"] == {"keep": 7}
+        assert kwargs["extra_body"] == {"keep": 7, "service_tier": "priority"}
 
 
 def test_custom_configuration_does_not_replace_native_tier_authority(config):
@@ -285,7 +285,7 @@ def test_custom_configuration_does_not_replace_native_tier_authority(config):
         config["providers"]["paid"]["fast_mode"] = enabled
         assert build()["extra_body"]["service_tier"] == "priority"
         custom = aux._build_call_kwargs("custom:paid", MODEL, [], base_url=URL, task="compression")
-        assert "service_tier" not in custom.get("extra_body", {})
+        assert custom["extra_body"]["service_tier"] == "priority"
 
 
 def test_other_auxiliary_tasks_ignore_compression_tier_policy(config):
@@ -344,13 +344,12 @@ def test_nous_recovery_revalidates_each_actual_destination(config, monkeypatch, 
         asyncio.run(aux.async_call_llm(**kw))
     else:
         aux.call_llm(**kw)
-    assert first.requests[0]["extra_body"] == ({"keep": 7} if policy == "priority" else {"keep": 7, "service_tier": "priority"})
+    assert first.requests[0]["extra_body"] == {"keep": 7, "service_tier": "priority"}
     recovered = (first.requests[1] if recovery == "model" else
                  captured_messages[0] if recovery == "protocol" else retry.requests[0])
     assert recovered["model"] == (healed_model if recovery == "model" else MODEL)
-    expected = {"keep": 7}
-    if policy != "priority":
-        expected["service_tier"] = "priority"
+    expected = ({"keep": 7, "speed": "fast"} if policy == "priority" and recovery == "protocol"
+                else {"keep": 7, "service_tier": "priority"})
     assert recovered["extra_body"] == expected
     assert "_compression_service_tiers" not in recovered
 
@@ -368,7 +367,7 @@ def test_reprojection_clears_stale_messages_fast_authorization(config, revocatio
     result = apply_compression_service_tier(kwargs, config["auxiliary"]["compression"],
         provider="anthropic", base_url=url,
         api_mode="anthropic_messages", model="unsupported-model" if revocation == "model" else model)
-    assert result["extra_body"] == {"keep": 7}
+    assert result["extra_body"] == ({"keep": 7} if revocation == "off" else {"keep": 7, "speed": "fast"})
     assert kwargs["extra_body"]["speed"] == "fast"
     assert "_compression_service_tiers" not in result
 
@@ -409,9 +408,9 @@ def test_explicit_task_credentials_keep_named_authority_on_refresh(
     else:
         aux.call_llm(**kw)
     assert resolved_providers == ["custom", "custom"]
-    assert first.requests[0]["extra_body"] == {"keep": 7}
+    assert first.requests[0]["extra_body"] == {"keep": 7, "service_tier": "priority"}
     assert retry.requests[0]["model"] == retry_model
-    expected = {"keep": 7}
+    expected = {"keep": 7, "service_tier": "priority"}
     assert retry.requests[0]["extra_body"] == expected
 
 
@@ -501,7 +500,8 @@ def test_recovery_to_actual_chat_sdk_revokes_old_protocol_tier(
     body = json.loads(requests[0].content)
     assert body["model"] == model
     assert body["keep"] == 7
-    assert not {"service_tier", "speed", "_compression_service_tiers"} & body.keys()
+    assert body["service_tier"] == "priority"
+    assert not {"speed", "_compression_service_tiers"} & body.keys()
     assert "_compression_service_tiers" not in recovered
     # Recovery must not mutate the failed request's existing projection.
     assert kwargs["extra_body"].get("service_tier" if original_mode == "codex_responses" else "speed")

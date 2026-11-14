@@ -110,12 +110,20 @@ def test_unsupported_inheritance_refuses_before_any_child_effect(monkeypatch, tm
     def forbidden(*args, **kwargs):
         pytest.fail("refused task reached a child construction/publication effect")
 
-    for name in ("_open_child_session_db", "_reserve_child_transcript", "_attach_child"):
-        monkeypatch.setattr(delegate_tool, name, forbidden)
+    allowed = change in {"named", "private_url", "protocol", "url_only"}
+    if not allowed:
+        for name in ("_open_child_session_db", "_reserve_child_transcript", "_attach_child"):
+            monkeypatch.setattr(delegate_tool, name, forbidden)
     with owner_scope(authority_for(tmp_path)), policy_scope(policy_for(tmp_path, config), authority=authority_for(tmp_path)):
         result, built, children = _spawn([route], parent=parent)
-    assert not built and not children
-    assert ("paid window" if change in {"auto", "cold"} else "not available") in json.dumps(result)
+    if allowed:
+        assert len(built) == len(children) == 1
+        expected = {"service_tier": "priority"}
+        assert built[0]["request_overrides"] == children[0].request_overrides == expected
+        assert children[0].service_tier == "priority"
+    else:
+        assert not built and not children
+        assert ("paid window" if change in {"auto", "cold"} else "not available") in json.dumps(result)
 
 
 def test_each_dispatch_reads_parent_selection_and_keeps_siblings_independent(monkeypatch, tmp_path):

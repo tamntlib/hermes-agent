@@ -126,8 +126,11 @@ def test_fast_is_session_scoped_validated_and_read_back(tmp_path):
                 assert (await rpc(ws, 'config.set', key='fast', value='toggle', session_id=sid)
                         )['result']['value'] == 'normal'
                 assert (await rpc(ws, 'config.get', key='fast', session_id=sid))['result']['value'] == 'normal'
+                result = await rpc(ws, 'config.set', key='fast', value='fast', session_id=other)
+                assert result.get('result') == {'key': 'fast', 'value': 'fast'}, result
+                assert (await rpc(ws, 'config.get', key='fast', session_id=other))['result']['value'] == 'fast'
                 for params, reason in [
-                    ({'key': 'fast', 'value': 'fast', 'session_id': other}, 'fast_unavailable'),
+                    ({'key': 'fast', 'value': 'ultrafast', 'session_id': other}, 'fast_unavailable'),
                     ({'key': 'fast', 'value': 'warp', 'session_id': sid}, 'invalid_params'),
                     ({'key': 'fast', 'value': 'fast'}, 'invalid_params'),
                 ]:

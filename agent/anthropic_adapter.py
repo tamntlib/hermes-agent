@@ -708,7 +708,7 @@ def build_anthropic_kwargs(
     # Fast mode: native Anthropic only — third-party providers reject the unknown beta/param and
     # Anthropic scopes it to the Claude API (not Bedrock/Vertex/Foundry). Per-request extra_headers
     # OVERRIDE the client-level anthropic-beta header, so rebuild the full beta list.
-    if fast_mode and not _is_third_party_anthropic_endpoint(base_url) and _supports_fast_mode(model):
+    if fast_mode:
         kwargs.setdefault("extra_body", {})["speed"] = "fast"
         betas = _common_betas_for_base_url(base_url, drop_context_1m_beta=drop_context_1m_beta)
         kwargs["extra_headers"] = _beta_header(betas + (_OAUTH_ONLY_BETAS if is_oauth else []) + [_FAST_MODE_BETA])
