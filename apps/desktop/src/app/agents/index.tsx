@@ -2,6 +2,7 @@ import { compactNumber } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
 import { Fragment, type ReactNode, useEffect, useMemo, useState } from 'react'
 
+import { useSubagentSnapshot } from '@/app/chat/composer/status-stack/use-subagent-snapshot'
 import { useElapsedSeconds } from '@/components/chat/activity-timer'
 import { ActivityTimerText } from '@/components/chat/activity-timer-text'
 import { usePaneVisible } from '@/components/pane-shell/pane-visibility'
@@ -15,6 +16,7 @@ import { cn } from '@/lib/utils'
 import { $activeSessionId } from '@/store/session'
 import {
   $subagentsBySession,
+  activeSubagentCount,
   buildSubagentTree,
   type SubagentNode,
   subagentsForPanel,
@@ -81,6 +83,12 @@ interface AgentsViewProps {
   onClose: () => void
 }
 
+function SubagentSnapshot({ sessionId }: { sessionId: string }) {
+  useSubagentSnapshot(sessionId)
+
+  return null
+}
+
 export function AgentsView({ onClose }: AgentsViewProps) {
   const { t } = useI18n()
   const subagentsBySession = useStore($subagentsBySession)
@@ -98,6 +106,12 @@ export function AgentsView({ onClose }: AgentsViewProps) {
 
   return (
     <Panel closeLabel={t.agents.close} onClose={onClose}>
+      {/* Background composers may be hidden after a reconnect; the tree must reconcile the live rows it shows. */}
+      {Object.entries(subagentsBySession)
+        .filter(([, items]) => activeSubagentCount(items) > 0)
+        .map(([sessionId]) => (
+          <SubagentSnapshot key={sessionId} sessionId={sessionId} />
+        ))}
       {tree.length === 0 ? (
         <PanelEmpty description={t.agents.emptyDesc} icon="hubot" title={t.agents.emptyTitle} />
       ) : (

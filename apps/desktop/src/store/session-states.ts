@@ -96,6 +96,7 @@ import {
 } from './session-request-router'
 import { orderTilesByTree } from './session-tile-order'
 import { ackStoredSessionId, isMessagingCompletion, markSessionUnreadFinished } from './session-unread'
+import { $subagentsBySession, retainSubagentOwner } from './subagents'
 import { migrateTranscriptTailsForProfile } from './transcript-tail-cache'
 import { isBrowserWindow, isSecondaryWindow } from './windows'
 
@@ -909,6 +910,8 @@ export function releaseSessionTranscript(runtimeId: string, state?: ClientSessio
 }
 
 export function dropSessionState(runtimeId: string) {
+  retainSubagentOwner(runtimeId, knownOwnerForSession(runtimeId))
+
   // Disarm the watchdog — a dropped runtime must not fire a stale clear later.
   // Settle-grace entries are keyed by stored id and self-expire; leave them so
   // a just-finished session's row survives merge eviction even if its tile or
@@ -938,6 +941,10 @@ export function dropSessionState(runtimeId: string) {
  *  wiped gateway's sessions must not fire stale clears or linger in the
  *  sidebar merge keep-set after the switch. */
 export function clearAllSessionStates() {
+  for (const runtimeId of Object.keys($subagentsBySession.get())) {
+    retainSubagentOwner(runtimeId, knownOwnerForSession(runtimeId))
+  }
+
   for (const timer of sessionWatchdogTimers.values()) {
     clearTimeout(timer)
   }
