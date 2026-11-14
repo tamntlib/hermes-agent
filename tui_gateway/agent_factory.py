@@ -146,6 +146,18 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
     provider, base_url, api_mode = (str(route.get(k) or "").strip() for k in ("provider", "base_url", "api_mode"))
     service_tier = str(model_config.get("service_tier") or "").strip()
     reasoning_config = model_config.get("reasoning_config")
+    if provider.lower() == "custom" and base_url:
+        # Billing identity is not paid-tier authority. Recover only an unambiguous
+        # exact route; never let a shared model name redirect a Responses session.
+        from hermes_cli.runtime_provider_custom import recover_custom_route_identity
+        healed = recover_custom_route_identity(base_url=base_url, api_mode=api_mode or None, model=model or None)
+        if not healed:
+            from hermes_cli.runtime_provider_custom import _endpoint_identity
+            if api_mode in {"", "chat_completions"} and _endpoint_identity(base_url) == "llamacpp":
+                healed, base_url = "llamacpp", ""
+            else:
+                raise ValueError("Cannot restore the custom provider route safely; select the provider explicitly with /model.")
+        provider = healed
     from hermes_cli.runtime_provider import is_foreign_provider_endpoint
     if is_foreign_provider_endpoint(provider, base_url):
         # The endpoint and its wire belong to the provider this chat left; resolve the stored one's own.
@@ -227,7 +239,14 @@ def _persist_live_session_runtime(session: dict | None) -> None:
             model_config["composer_override_profile"] = composer_profile
         elif "composer_override_profile" in session:
             model_config.pop("composer_override_profile", None)
-        if (tier_override := session.get("create_service_tier_override")) is not None:
+        tier_override = session.get("create_service_tier_override")
+        if tier_override is None and not model_config.get("service_tier"):
+            # Resume records keep explicit normal here, not in the create pin.
+            # Only restore the empty override: a newer nonempty live tier wins.
+            resume_overrides = session.get("resume_runtime_overrides") or {}
+            if resume_overrides.get("service_tier_override") == "":
+                tier_override = ""
+        if tier_override is not None:
             # agent.service_tier is None for explicit normal; without this the distinction is erased on every persist.
             model_config["service_tier"] = tier_override or "normal"
         model = str(model_config.get("model") or "").strip()

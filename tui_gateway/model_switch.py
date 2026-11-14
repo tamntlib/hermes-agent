@@ -12,7 +12,7 @@ from .method_ctx import HandlerRegistry, bind_module
 _registry = HandlerRegistry()
 
 
-_RUNTIME_KEYS = ("model", "provider", "api_key", "base_url", "api_mode")
+_RUNTIME_KEYS = ("model", "provider", "api_key", "base_url", "api_mode", "requested_provider")
 
 
 def _snapshot_agent_model_runtime(agent) -> dict:
@@ -40,11 +40,17 @@ def _restore_agent_model_runtime(agent, snapshot: dict | None) -> None:
             if agent._restore_primary_runtime():
                 if "reasoning_config" in snapshot:
                     agent.reasoning_config = snapshot["reasoning_config"]
+                if "requested_provider" in snapshot:
+                    agent.requested_provider = snapshot["requested_provider"]
                 return
         except Exception:
             logger.debug("TUI one-turn model restore via primary runtime failed", exc_info=True)
     if hasattr(agent, "switch_model"):
-        model, provider, api_key, base_url, api_mode = (snapshot.get(k, "") for k in _RUNTIME_KEYS)
+        model, provider, api_key, base_url, api_mode = (
+            snapshot.get(k, "") for k in ("model", "provider", "api_key", "base_url", "api_mode"))
+        requested = snapshot.get("requested_provider")
+        if provider == "custom" and requested not in {None, "", "custom", "auto"}:
+            provider = requested
         agent.switch_model(
             new_model=model, new_provider=provider, api_key=api_key, base_url=base_url,
             api_mode=api_mode, capabilities=snapshot.get("capabilities"))
@@ -53,6 +59,8 @@ def _restore_agent_model_runtime(agent, snapshot: dict | None) -> None:
         if isinstance(primary, dict) and primary.get("model") == model:
             from agent.route_verdicts import restore_primary_route_verdicts
             restore_primary_route_verdicts(agent, copy.deepcopy(primary))
+        if "requested_provider" in snapshot:
+            agent.requested_provider = requested
         if "reasoning_config" in snapshot:
             agent.reasoning_config = snapshot["reasoning_config"]
 
@@ -219,8 +227,11 @@ def _switch_request(raw_input: str, parsed_flags, persist_override) -> tuple[str
 def _current_model_runtime(agent, explicit_provider: str) -> tuple:
     """(provider, model, base_url, api_key) to switch from: live agent, else configured runtime."""
     if agent:
-        return tuple(
-            getattr(agent, k, "") or "" for k in ("provider", "model", "base_url", "api_key"))
+        provider = getattr(agent, "provider", "") or ""
+        requested = getattr(agent, "requested_provider", "") or ""
+        if provider == "custom" and requested not in {"", "custom", "auto"}:
+            provider = requested
+        return provider, *(getattr(agent, k, "") or "" for k in ("model", "base_url", "api_key"))
     current_model = _resolve_model()
     if explicit_provider:
         return explicit_provider.strip(), current_model, "", ""
