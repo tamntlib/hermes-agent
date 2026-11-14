@@ -23,16 +23,16 @@ import {
 } from '@/components/ui/sidebar'
 import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
 import { useContributions } from '@/contrib/react/use-contributions'
-import { type SessionInfo, type SessionSearchResult } from '@/hermes'
+import { type SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { comboTokens } from '@/lib/keybinds/combo'
-import { sessionMatchesSearch } from '@/lib/session-search'
 import { normalizeSessionSource, sessionSourceLabel } from '@/lib/session-source'
 import { cn } from '@/lib/utils'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $activeConnectionId } from '@/store/connections'
 import { $cronJobs } from '@/store/cron'
 import { recordAction } from '@/store/desktop-metrics'
+import { $primaryGatewayRoute } from '@/store/gateway-primary-route'
 import { $interfaceMode, $showsAdvancedChrome, shownInMode } from '@/store/interface-mode'
 import { $bindings } from '@/store/keybinds'
 import {
@@ -114,6 +114,7 @@ import {
   sessionPrKey
 } from '@/store/pull-requests'
 import { openRouteTile } from '@/store/route-tiles'
+import { $connection } from '@/store/session'
 import {
   $cronSessions,
   $gatewayState,
@@ -157,7 +158,7 @@ import { SidebarFilterMenu } from './filter-menu'
 import { buildGatewaySessionGroups, scopeGatewaySessionGroups, useGatewaySessionGroups } from './gateway-group-model'
 import { SidebarLoadMoreRow } from './load-more-row'
 import { orderByIds, reconcileOrderIds, resolveManualSessionOrderIds, sameIds } from './order'
-import { filterSessionsByProfileScope } from './profile-scope'
+import { filterSessionsByProfileScope, sessionMatchesProfileScope } from './profile-scope'
 import { ProfileRail } from './profile-switcher'
 import { ProjectDialog } from './project-dialog'
 import { filterToSessionBearingProjects, resolveLiveProjectFilter } from './project-filter'
@@ -182,6 +183,7 @@ import {
   useRepoWorktreeMap
 } from './projects'
 import { WorktreeDialog } from './projects/worktree-dialog'
+import { mergeSearchResults } from './search-results'
 import {
   hasSessionArea,
   SidebarBlankState,
@@ -281,98 +283,6 @@ const HEADER_ACTION_BTN =
 // a hover-revealed action.
 const HEADER_NAV_BTN =
   'text-(--ui-text-tertiary) opacity-70 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground hover:opacity-100 focus-visible:opacity-100'
-
-// FTS results cover sessions that aren't in the loaded page; synthesize a
-// minimal SessionInfo so they render in the same row component (resume works
-// by id; the snippet stands in for the preview).
-
-// The backend's FTS layer wraps matched terms in literal '>>>' / '<<<'
-// highlight markers (sqlite snippet() delimiters — see hermes_state_search.py).
-// The sidebar renders the snippet as plain text, so the markers must be
-// stripped or a search for "foo" paints rows titled ">>>foo<<<".
-// Exported for tests.
-export function stripFtsMarkers(snippet: string): string {
-  return snippet.replaceAll('>>>', '').replaceAll('<<<', '')
-}
-
-// The backend already ships the real session title on every search hit
-// (web_routers/sessions.py add_lineage_result enriches each result via
-// get_session_rich_row). Map it onto the synthesized row so the sidebar
-// paints the actual name; the snippet stays as the preview. Untitled
-// sessions keep today's snippet fallback via sessionTitle().
-// Exported for tests.
-export function searchResultToSession(result: SessionSearchResult): SessionInfo {
-  const ts = result.session_started ?? Date.now() / 1000
-
-  return {
-    archived: false,
-    cwd: null,
-    ended_at: null,
-    id: result.session_id,
-    _lineage_root_id: result.lineage_root ?? null,
-    input_tokens: 0,
-    is_active: false,
-    last_active: result.last_active ?? ts,
-    message_count: 0,
-    model: result.model ?? null,
-    output_tokens: 0,
-    preview: stripFtsMarkers(result.snippet ?? '').trim() || null,
-    source: result.source ?? null,
-    started_at: ts,
-    title: result.title?.trim() || null,
-    tool_call_count: 0
-  }
-}
-
-export function mergeSearchResults(
-  sortedSessions: readonly SessionInfo[],
-  query: string,
-  serverMatches: readonly SessionSearchResult[],
-  sessionByAnyId: ReadonlyMap<string, SessionInfo>,
-  searchPending: boolean
-): SessionInfo[] {
-  if (!query) {
-    return []
-  }
-
-  // While the request is in flight the client's own recency-ordered matches
-  // are all there is — instant feedback while typing, and no leftovers from
-  // whatever the previous query's request returned. Once the ranked server
-  // response lands, it decides the order: the backend runs direct id matches
-  // before FTS content hits, so pasting a session's exact id must keep that
-  // hit on top instead of letting newer quoting sessions bury it.
-  const out = new Map<string, SessionInfo>()
-
-  if (searchPending) {
-    for (const s of sortedSessions) {
-      if (sessionMatchesSearch(s, query)) {
-        out.set(s.id, s)
-      }
-    }
-
-    return [...out.values()]
-  }
-
-  for (const match of serverMatches) {
-    if (out.has(match.session_id)) {
-      continue
-    }
-
-    const loaded = sessionByAnyId.get(match.session_id)
-    out.set(match.session_id, loaded ?? searchResultToSession(match))
-  }
-
-  // Client-only matches that the server didn't return (e.g. cwd/git-branch
-  // fields the FTS index doesn't cover) still deserve a row — after the
-  // ranked hits, in recency order.
-  for (const s of sortedSessions) {
-    if (!out.has(s.id) && sessionMatchesSearch(s, query)) {
-      out.set(s.id, s)
-    }
-  }
-
-  return [...out.values()]
-}
 
 interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
   currentView: AppView
@@ -499,6 +409,25 @@ export function ChatSidebar({
   const profiles = useStore($profiles)
   const profileScope = useStore($profileScope)
   const activeConnectionId = useStore($activeConnectionId)
+  const connection = useStore($connection)
+  const connectionsRegistry = useStore($connectionsRegistry)
+  const primaryGatewayRoute = useStore($primaryGatewayRoute)
+
+  const connectionScope = useMemo(
+    () => ({
+      connectionId: activeConnectionId || (connection?.mode === 'local' ? 'local' : undefined),
+      primaryConnectionId:
+        connectionsRegistry?.primary ||
+        primaryGatewayRoute?.connectionId ||
+        (primaryGatewayRoute?.mode === 'local' ? 'local' : undefined)
+    }),
+    [activeConnectionId, connection?.mode, connectionsRegistry?.primary, primaryGatewayRoute]
+  )
+
+  const matchesScope = useCallback(
+    (session: SessionInfo) => sessionMatchesProfileScope(session, profileScope, connectionScope),
+    [profileScope, connectionScope]
+  )
 
   // Toggle the persisted read-state watermark from a row menu. The row's own
   // `unread` prop mirrors what the dot paints; flip it and let the backend
@@ -607,8 +536,8 @@ export function ChatSidebar({
   const scopedSessions = useMemo(() => {
     const pool = showArchived ? archivedSessions : sessions
 
-    return filterSessionsByProfileScope(pool, profileScope)
-  }, [sessions, archivedSessions, showArchived, profileScope])
+    return filterSessionsByProfileScope(pool, profileScope, connectionScope)
+  }, [sessions, archivedSessions, showArchived, profileScope, connectionScope])
 
   // One predicate for the status/project filters, so the flat list and the
   // project lanes narrow by the same rule. A project lane holds rows the loaded
@@ -674,13 +603,13 @@ export function ChatSidebar({
   )
 
   const visibleCronSessions = useMemo(
-    () => filterSessionsByProfileScope(cronSessions, profileScope),
-    [cronSessions, profileScope]
+    () => filterSessionsByProfileScope(cronSessions, profileScope, connectionScope),
+    [cronSessions, profileScope, connectionScope]
   )
 
   const visibleMessagingSessions = useMemo(
-    () => filterSessionsByProfileScope(messagingSessions, profileScope),
-    [messagingSessions, profileScope]
+    () => filterSessionsByProfileScope(messagingSessions, profileScope, connectionScope),
+    [messagingSessions, profileScope, connectionScope]
   )
 
   // Index sessions by every id a pin might be stored under — recents, cron,
@@ -699,10 +628,17 @@ export function ChatSidebar({
       resolvePinnedSessions(
         pinnedSessionIds,
         sessionByAnyId,
-        [...visibleSessions, ...cronSessions, ...messagingSessions],
+        [...visibleSessions, ...visibleCronSessions, ...visibleMessagingSessions],
         unconfirmedPinWrites
       ),
-    [pinnedSessionIds, sessionByAnyId, visibleSessions, cronSessions, messagingSessions, unconfirmedPinWrites]
+    [
+      pinnedSessionIds,
+      sessionByAnyId,
+      visibleSessions,
+      visibleCronSessions,
+      visibleMessagingSessions,
+      unconfirmedPinWrites
+    ]
   )
 
   // Every id a pin is reachable under: the raw stored ids, plus BOTH identities
@@ -740,15 +676,19 @@ export function ChatSidebar({
   // anything the active filters exclude, so filtering works the same whether
   // you're looking at the flat list or the lanes.
   const isHiddenFromProjects = useCallback(
-    (session: SessionInfo) => isPinnedSession(session) || (filtersNarrow && !sessionMatchesFilters(session)),
-    [isPinnedSession, filtersNarrow, sessionMatchesFilters]
+    (session: SessionInfo) =>
+      !matchesScope(session) || isPinnedSession(session) || (filtersNarrow && !sessionMatchesFilters(session)),
+    [matchesScope, isPinnedSession, filtersNarrow, sessionMatchesFilters]
   )
 
   const { searchPending, serverMatches } = useServerSessionSearch(trimmedQuery, profileScope)
 
   const searchResults = useMemo(
-    () => mergeSearchResults(sortedSessions, trimmedQuery, serverMatches, sessionByAnyId, searchPending),
-    [sortedSessions, trimmedQuery, serverMatches, sessionByAnyId, searchPending]
+    () =>
+      mergeSearchResults(sortedSessions, trimmedQuery, serverMatches, sessionByAnyId, searchPending).filter(
+        matchesScope
+      ),
+    [sortedSessions, trimmedQuery, serverMatches, sessionByAnyId, searchPending, matchesScope]
   )
 
   const unpinnedAgentSessions = useMemo(
@@ -1229,7 +1169,8 @@ export function ChatSidebar({
     const isHidden = (session: SessionInfo) => isHiddenFromProjects(session) || removedSessionIds.has(session.id)
     const counts: Record<string, number> = {}
 
-    for (const session of sessions) {
+    // A foreign retained row was never part of this backend's project total.
+    for (const session of scopedSessions) {
       const projectId = isHidden(session) ? sessionBucketId(session, projects, projectOwners) : null
 
       if (projectId) {
@@ -1238,7 +1179,7 @@ export function ChatSidebar({
     }
 
     return { isHidden, counts }
-  }, [sessions, projects, projectOwners, isHiddenFromProjects, removedSessionIds])
+  }, [scopedSessions, projects, projectOwners, isHiddenFromProjects, removedSessionIds])
 
   const onEnterProject = useCallback(
     (id: string) => {
@@ -1371,7 +1312,6 @@ export function ChatSidebar({
   // ([connectionId, profile]), so a platform's groups line up with recents.
   const ownerGrouped = profileScope === ALL_PROFILES && grouping === 'profile'
   const profileGroups = useGatewaySessionGroups(agentSessions, ownerGrouped, filtersNarrow)
-  const connectionsRegistry = useStore($connectionsRegistry)
   const profileColors = useStore($profileColors)
 
   // The flat Sessions list always shows ALL recent sessions; Projects is a
