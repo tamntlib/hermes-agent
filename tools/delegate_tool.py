@@ -230,6 +230,8 @@ def _build_child_agent(
     override_reasoning_effort: Any = None,
     profile_home: Optional[Path] = None,
     override_service_tier: Optional[str] = None,  # a route's checked speed tier (tools/delegate_tool_tuning.py)
+    _resolved_runtime: Optional[dict[str, Any]] = None,
+    _tier_overrides: Optional[dict[str, Any]] = None,
 ):
     """Build (don't run) a child AIAgent on the main thread. override_* (from delegation config) replace parent
     inheritance so children can run on a different provider:model pair. ``profile_home`` builds (and later runs,
@@ -271,14 +273,14 @@ def _build_child_agent(
         model=model or getattr(parent_agent, "model", None), toolsets=child_toolsets, session_ref=child_session_ref,
     )
     with delegated_profile_scope(profile_home):
-        rt = _resolve_child_runtime(
+        rt = dict(_resolved_runtime) if _resolved_runtime is not None else _resolve_child_runtime(
             parent_agent, delegation_cfg, parent_api_key, model=model, override_provider=override_provider,
             override_base_url=override_base_url, override_api_key=override_api_key, override_api_mode=override_api_mode,
             override_acp_command=override_acp_command,
             override_acp_args=override_acp_args,
             routing_cfg=routing_cfg, override_reasoning_effort=override_reasoning_effort,
         )
-        if override_service_tier:
+        if override_service_tier is not None:
             rt["service_tier"] = override_service_tier
         if override_request_overrides is not None:
             # honored whenever set, incl. the inherit branch where
@@ -327,6 +329,7 @@ def _build_child_agent(
             rt["provider"], None if profile_home is not None else parent_agent, rt["base_url"],
             effective_requested_provider=rt.get("requested_provider"),
         )
+        pin_child_service_tier(child, {"task_tier_overrides": _tier_overrides})
     child._print_fn = getattr(parent_agent, "_print_fn", None)
     _apply_child_cache_ttl(child)
     if child_session_db is not None:
@@ -356,7 +359,8 @@ def _build_child_agent(
         from tools.delegate_tool_sessions import SUBAGENT_ID_KEY
         child._session_init_model_config["_delegate_from"] = parent_sid
         child._session_init_model_config[SUBAGENT_ID_KEY] = subagent_id
-    child._delegate_profile_home = profile_home  # _ChildRun.await_child runs the conversation in this scope
+    from hermes_constants import get_hermes_home
+    child._delegate_profile_home = profile_home or get_hermes_home()
     if child_pool is not None:
         child._credential_pool = child_pool
 
@@ -450,6 +454,7 @@ def _credential_overrides(creds: dict[str, Any], routing_cfg: dict[str, Any]) ->
         "override_acp_args": creds.get("args"),
         "override_service_tier": creds.get("service_tier"),
         "routing_cfg": routing_cfg,
+        **({"_tier_overrides": creds["task_tier_overrides"]} if "task_tier_overrides" in creds else {}),
     }
 
 
@@ -458,6 +463,7 @@ def _route_overrides(route: Any) -> dict[str, Any]:
     return {
         **_credential_overrides(route.creds, route.routing_cfg),
         "override_reasoning_effort": route.reasoning_effort, "profile_home": route.profile_home,
+        **({"_resolved_runtime": route.runtime_kwargs} if route.runtime_kwargs is not None else {}),
     }
 
 
@@ -492,7 +498,6 @@ def _build_children(
                 _detach_child(parent_agent, built)
                 _close_child(built, "Failed to close child after a refused sibling")
             return [], str(exc)
-        pin_child_service_tier(child, route.creds)
         if _task_schema is not None:
             with _quiet("Could not attach output schema to child %d", i):
                 child._delegate_output_schema = _task_schema

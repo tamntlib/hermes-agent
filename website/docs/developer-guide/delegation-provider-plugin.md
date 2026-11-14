@@ -108,10 +108,14 @@ A route is a dict with any of:
   A `reasoning_effort` that is not a known level (`none`, `minimal`, `low`, `medium`, `high`,
   `xhigh`, ...) refuses the task with a tool error instead of falling back to the parent's level; the
   `delegation.reasoning_effort` value itself keeps its usual warn-and-inherit rule.
-- `service_tier`: `normal`, `fast` or `ultrafast`. Core checks it against the resolved route with the
-  same gates as `/fast` (and, for `ultrafast`, the signed-in Codex account's catalog). A tier the
-  route does not offer refuses the task; otherwise it applies to that child only and is re-applied
-  after the child is built, so a custom provider's `extra_body` cannot restore another tier.
+- `service_tier`: `normal`, `fast` or `ultrafast`. An explicit selection wins; otherwise an ordinary
+  non-profile task inherits the live parent's selected tier at dispatch, independently of its request
+  overrides. Core validates that selection against the resolved child route before construction;
+  the builder reuses that route. Explicit Normal clears paid fields, including provider `extra_body`,
+  before transcript reservation and spawn publication. Auto/Cold cannot transfer the parent's bounded
+  window and are refused; an explicit static route tier can override a bounded parent.
+  This does not change upstream SDK normalization, later credential negotiation or runtime fallback,
+  and does not prove the upstream applied or billed tier.
 - `profile`: the name of a Hermes profile. The child runs **as that profile**: its `config.yaml`,
   primary model and credentials (a `model.default` alias or named provider resolves exactly as at
   CLI startup), credential pool, fallback chain, reasoning (`agent.reasoning_effort` and

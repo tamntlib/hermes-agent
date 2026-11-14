@@ -37,7 +37,9 @@ def _parent(request_overrides=None):
     parent = MagicMock()
     parent.base_url, parent.api_key, parent.provider = "https://openrouter.ai/api/v1", "parent-key", "openrouter"
     parent.api_mode, parent.model, parent.platform = "chat_completions", "anthropic/claude-sonnet-4", "cli"
+    parent.requested_provider = parent.provider
     parent.request_overrides = request_overrides or {}
+    parent.service_tier = None
     parent.reasoning_config = {"enabled": True, "effort": "medium"}
     parent.providers_allowed = parent.providers_ignored = parent.providers_order = parent.provider_sort = None
     parent._session_db, parent._delegate_depth, parent._active_children = None, 0, []
@@ -76,7 +78,7 @@ def test_route_tier_reaches_the_child_and_its_sibling_keeps_the_default():
     result, (fast, plain), _ = _spawn([{**CODEX, "service_tier": "fast"}, None])
     assert result == {"status": "built"}
     assert fast["request_overrides"]["service_tier"] == "priority" and fast["service_tier"] == "priority"
-    assert "service_tier" not in plain["request_overrides"] and plain.get("service_tier") is None
+    assert "service_tier" not in plain["request_overrides"] and plain.get("service_tier") == ""
 
 
 @pytest.mark.parametrize("route, needle", [
@@ -140,7 +142,7 @@ def test_default_backend_never_reads_a_tier_from_the_delegation_section():
     from agent.delegation_registry import get_active_provider
     result, (child,), _ = _spawn([None], cfg={**CODEX, "service_tier": "fast"}, provider=get_active_provider({}))
     assert result == {"status": "built"}
-    assert child.get("service_tier") is None and "service_tier" not in child["request_overrides"]
+    assert child.get("service_tier") == "" and "service_tier" not in child["request_overrides"]
 
 
 def test_unknown_route_reasoning_effort_refuses_the_task_never_the_parents_level():
@@ -190,7 +192,12 @@ def test_an_inherited_fast_tier_is_reported_as_what_ran():
     """An empty backend route inherits the parent's request settings, fast tier included: the report says fast."""
     from tools.delegate_tool_child_run import _SchemaOutcome, _build_result_entry
 
-    _, _, (child,) = _spawn([{"label": "inherit"}], parent=_parent(request_overrides={"service_tier": "priority"}))
+    parent = _parent(request_overrides={"service_tier": "priority"})
+    parent.service_tier = "priority"
+    parent.model, parent.provider = "gpt-6-astra", "openai-codex"
+    parent.requested_provider = parent.provider
+    parent.base_url, parent.api_mode = CODEX["base_url"], "codex_responses"
+    _, _, (child,) = _spawn([{"label": "inherit"}], parent=parent)
     entry = _build_result_entry(child, {"final_response": "ok", "completed": True}, 0, 1.0,
                                 _SchemaOutcome(None, None, [], 0))
     assert entry["route"]["service_tier"] == "fast"
