@@ -1367,6 +1367,9 @@ def spawn_background_review_thread(
     # Per-agent overrides (agent._MEMORY_REVIEW_PROMPT etc.) keep working.
     name = _PROMPT_NAME_BY_SCOPE[(review_memory, review_skills)]
     prompt = getattr(agent, name, globals()[name])
+    if name != "_MEMORY_REVIEW_PROMPT":
+        from tools.skill_manager_guards import _load_local_skill_policy
+        prompt = _load_local_skill_policy().transform_review_prompt(prompt)
     if focus := (focus or "").strip():
         prompt = (
             f"{prompt}\n\nThe user explicitly requested this review with the following "
