@@ -1,12 +1,13 @@
 import { type RefObject, useRef, useState } from 'react'
 
-import type { DesktopConnectionConfigInput, DesktopConnectionProbeResult } from '@/global'
+import type { DesktopConnectionConfigInput, DesktopConnectionProbeResult, DesktopOauthLoginOptions } from '@/global'
 import { useI18n } from '@/i18n'
 import type { NotificationInput } from '@/store/notifications'
 
 import type { RemoteSetupHost } from './use-remote-setup'
 
 interface RemoteConnectionTestOptions {
+  identity?: DesktopOauthLoginOptions
   host: RemoteSetupHost
   url: string
   payload: DesktopConnectionConfigInput
@@ -33,13 +34,13 @@ export interface RemoteConnectionTest {
 export function useRemoteConnectionTest(options: RemoteConnectionTestOptions): RemoteConnectionTest {
   const { t } = useI18n()
   const g = t.settings.gateway
-  const { host, url, payload, canTest, authResolved, targetSeq, acceptProbe, notify } = options
+  const { host, url, payload, identity, canTest, authResolved, targetSeq, acceptProbe, notify } = options
   const [testing, setTesting] = useState<boolean>(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [testedKey, setTestedKey] = useState<string | null>(null)
   const testSeq = useRef<number>(0)
-  const payloadKey: string = JSON.stringify(payload)
+  const payloadKey: string = JSON.stringify([payload, identity])
   const currentKey = useRef<string>(payloadKey)
   currentKey.current = payloadKey
 
@@ -87,7 +88,9 @@ export function useRemoteConnectionTest(options: RemoteConnectionTestOptions): R
 
     try {
       if (!authResolved) {
-        const result = await window.hermesDesktop.probeConnectionConfig(url)
+        const result = await (identity
+          ? window.hermesDesktop.probeConnectionConfig(url, identity)
+          : window.hermesDesktop.probeConnectionConfig(url))
 
         if (current()) {
           acceptProbe(result)
@@ -100,7 +103,9 @@ export function useRemoteConnectionTest(options: RemoteConnectionTestOptions): R
         return
       }
 
-      const result = await window.hermesDesktop.testConnectionConfig(payload)
+      const result = await (identity
+        ? window.hermesDesktop.testConnectionConfig(payload, identity)
+        : window.hermesDesktop.testConnectionConfig(payload))
 
       if (!current()) {
         return

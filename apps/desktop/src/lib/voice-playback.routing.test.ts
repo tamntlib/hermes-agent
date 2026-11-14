@@ -114,8 +114,9 @@ describe('resolveSpeakStreamUrl', () => {
 
     // Best available answer without the bridges: the profile-scoped pool
     // descriptor's own wsUrl (no cross-scope re-mint).
-    expect(url).toContain('/api/audio/speak-stream')
-    expect(getConnection).toHaveBeenCalledWith('research')
+    expect(url).toBeNull()
+    expect(getConnection).not.toHaveBeenCalled()
+    expect(getGatewayWsUrl).not.toHaveBeenCalled()
   })
 
   it('resolves to null instead of hanging forever when getConnection() wedges (#93454)', async () => {

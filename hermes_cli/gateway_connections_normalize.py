@@ -318,6 +318,10 @@ class _Normalizer:
         self.labels.add(label_key(label))
         self.ids.add(cid)
         clean = {"id": cid, "kind": kind, "label": label}
+        from hermes_cli.gateway_connections_tunnel import copy_tunnel_intent
+        copy_tunnel_intent(clean, entry)
+        if clean.get("sshTunnelError"):
+            self.quarantine("entry-invalid-ssh-tunnel", entry)
         reason = None
         if kind in ("remote", "cloud"):
             reason = _remote_like_clean(clean, entry, kind)
@@ -342,6 +346,8 @@ def normalize_registry(raw: Any) -> dict:
     for item in raw_connections if isinstance(raw_connections, list) else []:
         norm.add(item)
     connections = norm.connections
+    from hermes_cli.gateway_connections_tunnel import preserve_blocked_tunnel_entries
+    preserve_blocked_tunnel_entries(connections, raw_connections)
     if not any(c["kind"] == "local" for c in connections):
         connections.insert(0, _local_entry())
     ids = {c["id"] for c in connections}
@@ -404,6 +410,10 @@ def _remote_input(data: dict, cid: str, kind: str, registry: dict) -> dict:
             raise DuplicateConnection(f'A connection to this gateway URL already exists ("{c["label"]}").', c["label"])
     auth_mode = stored_auth_mode(kind, data.get("authMode"), None)
     entry = {"id": cid, "kind": kind, "label": data["_label"], "url": url, "authMode": auth_mode}
+    from hermes_cli.gateway_connections_tunnel import copy_tunnel_intent
+    copy_tunnel_intent(entry, data)
+    if data.get("sshTunnel") is not None and entry.get("sshTunnelError"):
+        raise ConnectionStoreError(entry["sshTunnelError"])
     if "token" in data and kind == "remote" and auth_mode == "token":
         entry["token"] = data["token"]
     if "headers" in data:
@@ -441,14 +451,18 @@ def merge_connection_input(data: dict, existing: Optional[dict]) -> dict:
     """``mergeConnectionInput``: fields the editor does not carry survive an edit."""
     if not existing or existing.get("kind") != data.get("kind"):
         return data
+    if existing.get("sshTunnelError") and "sshTunnel" not in data:
+        raise ConnectionStoreError(existing["sshTunnelError"])
     merged = dict(data)
 
     def inherit(field: str) -> None:  # an absent key is TS `undefined`
         if field not in merged and field in existing:
             merged[field] = existing[field]
 
-    for field in ("url", "authMode", "org"):
+    for field in ("url", "authMode", "org", "sshTunnel"):
         inherit(field)
+    if "sshTunnel" not in data:
+        inherit("sshTunnelError")
     if data.get("kind") == "cloud" and ("url" not in data or _same_url(data["url"], existing.get("url"))):
         inherit("name")
     for field in ("host", "keyPath", "remoteHermesPath", "remoteProfile", "headers"):
@@ -466,7 +480,8 @@ def _same_url(a: Any, b: Any) -> bool:
 def connection_dial_fields_changed(before: dict, after: dict) -> bool:
     if before.get("kind") != after.get("kind"):
         return True
-    for field in ("url", "authMode", "org", "host", "user", "port", "keyPath", "remoteHermesPath", "remoteProfile"):
+    for field in ("url", "authMode", "org", "host", "user", "port", "keyPath", "remoteHermesPath", "remoteProfile",
+                  "sshTunnel", "sshTunnelError"):
         if before.get(field) != after.get(field):
             return True
     return before.get("token") != after.get("token") or before.get("headers") != after.get("headers")

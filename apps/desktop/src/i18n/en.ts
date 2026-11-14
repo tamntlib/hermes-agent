@@ -1276,6 +1276,11 @@ export const en: Translations = {
     },
     // v2 multi-connection registry: Settings → Gateways.
     connections: {
+      sshTunnelTitle: "Use SSH for Gateway and Terminal",
+      sshTunnelDesc: "Connects to an existing backend. Desktop does not install, start or manage Hermes on the SSH host. Sign-in and data use the tunnel; the URL identifies the connection.",
+      sshTunnelHost: "SSH host / alias",
+      sshTunnelKey: "Identity file (optional)",
+      sshTunnelDestination: "Backend: 127.0.0.1 at the Gateway URL port (HTTP 80 / HTTPS 443 by default). SSH login port is separate.",
       title: 'Registered gateways',
       intro: 'Manage this device and every Hermes gateway it can reach through remote, SSH, or Cloud connections.',
       stagedNote:

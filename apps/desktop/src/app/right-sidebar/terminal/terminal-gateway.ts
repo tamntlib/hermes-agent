@@ -14,6 +14,11 @@ export interface TerminalGateway {
   profile?: string
 }
 
+/** Keep SSH intent so invalid tunnel configuration reaches Electron's error path, never a local shell. */
+const usesSshShell = (connection: DesktopRegistryConnection): boolean =>
+  connection.kind === 'ssh' ||
+  (connection.kind === 'remote' && Boolean(connection.sshTunnel || connection.sshTunnelError))
+
 /** Where a shell for `connectionId` runs: an SSH gateway runs it on its own
  *  host; This device, URL/token and cloud gateways (no shell transport) run it
  *  here and say so. Undefined while the registry is unknown (or on a host with
@@ -29,7 +34,7 @@ export function shellGatewayFor(
     return undefined
   }
 
-  return source.kind === 'ssh'
+  return usesSshShell(source)
     ? { connectionId: source.id, profile: normalizeProfileKey(profile) }
     : { connectionId: LOCAL_CONNECTION_ID }
 }
@@ -65,7 +70,7 @@ export const terminalGatewayOf = (term: TerminalEntry | undefined): TerminalGate
 
 /** SSH gateways a terminal can be opened on, beside This device. */
 export const $terminalShellGateways = computed($connectionsRegistry, registry =>
-  (registry?.connections ?? []).filter(connection => connection.kind === 'ssh')
+  (registry?.connections ?? []).filter(usesSshShell)
 )
 
 export const $localGateway = computed(

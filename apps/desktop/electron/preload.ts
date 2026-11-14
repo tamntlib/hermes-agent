@@ -288,7 +288,7 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   getConnectionConfig: profile => ipcRenderer.invoke('hermes:connection-config:get', profile),
   saveConnectionConfig: payload => ipcRenderer.invoke('hermes:connection-config:save', payload),
   applyConnectionConfig: payload => ipcRenderer.invoke('hermes:connection-config:apply', payload),
-  testConnectionConfig: payload => ipcRenderer.invoke('hermes:connection-config:test', payload),
+  testConnectionConfig: (payload, options) => ipcRenderer.invoke('hermes:connection-config:test', payload, options),
   // Opt-in OS-keychain encryption for stored gateway secrets (default off —
   // see secret-storage-policy.ts). get never touches the OS keychain.
   getSecretStorageEncryption: () => ipcRenderer.invoke('hermes:secret-storage:get'),
@@ -318,7 +318,9 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   },
   sshConfigHosts: () => ipcRenderer.invoke('hermes:ssh-config:hosts'),
   sshResolveHost: host => ipcRenderer.invoke('hermes:ssh-config:resolve', host),
-  probeConnectionConfig: remoteUrl => ipcRenderer.invoke('hermes:connection-config:probe', remoteUrl),
+  probeConnectionConfig: (remoteUrl, options) =>
+    ipcRenderer.invoke('hermes:connection-config:probe', remoteUrl, options),
+  cancelConnectionDraft: () => ipcRenderer.invoke('hermes:connection-config:cancel-draft'),
   // `options` lets a registry-editor draft sign in BEFORE it is saved: the
   // main process settles the draft's connection id up front so the login
   // window writes into the per-connection cookie jar the saved entry will

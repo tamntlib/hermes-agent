@@ -14,6 +14,13 @@ export const arSettings = {
     noResults: 'لا توجد لغة مطابقة'
   },
   settings: {
+    connections: {
+      sshTunnelTitle: "استخدام SSH للبوابة والطرفية",
+      sshTunnelDesc: "يتصل بخادم موجود. لا يثبت Desktop برنامج Hermes أو يشغله أو يديره على مضيف SSH. يمر تسجيل الدخول والبيانات عبر النفق؛ ويحدد العنوان هوية الاتصال.",
+      sshTunnelHost: "مضيف SSH / الاسم المستعار",
+      sshTunnelKey: "ملف الهوية (اختياري)",
+      sshTunnelDestination: "الخادم: 127.0.0.1 بمنفذ Gateway URL (الافتراضي HTTP 80 / HTTPS 443). منفذ تسجيل دخول SSH مستقل.",
+    },
     memoryLayers: arMemoryLayers,
     // Window plans (Nous subscription with included usage). Other billing strings: overlay-gaps.json.
     billing: {

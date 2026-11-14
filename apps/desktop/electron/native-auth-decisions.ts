@@ -57,8 +57,8 @@ export function resolveJsonBody<T>(body: T): T {
  * is whether a native bearer token is stored; `hasCookieSession` is whether a
  * live AT-or-RT cookie exists in the OAuth partition. Either suffices.
  */
-export function oauthSessionIsLive(hasNativeToken: boolean, hasCookieSession: boolean): boolean {
-  return hasNativeToken || hasCookieSession
+export function oauthSessionIsLive(hasNativeToken: boolean, hasCookieSession: boolean, nativeOnly = false): boolean {
+  return hasNativeToken || (!nativeOnly && hasCookieSession)
 }
 
 export type OauthRestAuth = { kind: 'bearer'; token: string } | { kind: 'cookie' }

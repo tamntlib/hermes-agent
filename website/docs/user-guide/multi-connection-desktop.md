@@ -393,3 +393,40 @@ multi-gateway roster is the reference consumer.
 - **"Could not save the connection"** — most commonly a missing **Name**, a
   name already in use, or a malformed **Gateway URL** / **SSH host**; the
   error message names the exact violation.
+
+### SSH tunnel for a Remote Gateway
+
+Enable **Use SSH for Gateway and Terminal** in the registered Remote Gateway editor.
+Enter the SSH alias or destination (user@host:port), an optional identity-file path
+on the desktop machine. The backend port comes only from **Gateway URL**: an explicit
+URL port, otherwise HTTP 80 or HTTPS 443. SSH login uses its own port (default 22).
+Desktop forwards an ephemeral local loopback port to 127.0.0.1 at the URL's port on
+that server. Legacy stored backend-port values do not override the URL; put the
+backend port in Gateway URL when migrating an older connection.
+One connection shares its tunnel across windows and profiles. It does not install,
+start, stop or update a backend through SSH.
+
+Tunnel settings survive edits from the machine-wide shared Gateway store. This
+Remote Gateway tunnel is Desktop-only: Webapp dialing, Test and sign-in refuse it
+rather than contacting its public URL directly. This is separate from the managed
+**SSH** connection kind, which can start a remote service.
+
+The saved Gateway URL remains the stable connection and authentication-store
+identity. For an enabled tunnel, it is not a network fallback. Sign-in, refresh,
+REST and WebSocket traffic use the tunnel. This first version requires the server's
+native password sign-in capability; cookie-only, token-mode and upstream OAuth
+providers are rejected. Extra proxy headers and URL path prefixes are not supported.
+
+Each terminal pane opens an independent SSH shell to the same target. It does not
+borrow the chat or user control master, inherit port forwards, or fall back to a
+local shell on SSH errors. Working directories are remote paths; if a directory
+is missing, the remote shell may remain in its default directory.
+
+Changing or disabling tunnel dial settings closes affected terminal panes and
+retires that connection's transport. Renaming preserves them. Closing a pane or
+one window leaves the shared Gateway tunnel alive for other windows. Quitting
+closes client transports while leaving the existing server process running.
+
+Existing terminal-only settings from the earlier local patch are read once as the
+shared tunnel configuration; subsequent saves persist only sshTunnel. Direct
+Remote Gateway connections without this configuration keep their existing behavior.

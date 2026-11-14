@@ -1326,6 +1326,11 @@ export const zhOverrides = {
     },
     // v2 多连接注册表：设置 → 网关。
     connections: {
+      sshTunnelTitle: "网关和终端使用 SSH",
+      sshTunnelDesc: "连接现有后端。Desktop 不会在 SSH 主机上安装、启动或管理 Hermes。登录和数据均经过隧道；URL 用于标识连接。",
+      sshTunnelHost: "SSH 主机 / 别名",
+      sshTunnelKey: "密钥文件（可选）",
+      sshTunnelDestination: "后端：127.0.0.1，端口来自 Gateway URL（默认 HTTP 80 / HTTPS 443）。SSH 登录端口独立设置。",
       title: '已注册网关',
       intro: '管理本机以及通过远程、SSH 或 Hermes Cloud 连接可访问的每个 Hermes 网关。',
       stagedNote: '所有网关都保持连接。配置档案、聊天、消息和定时任务归属于各自网关，“会话”可以同时显示全部网关。',

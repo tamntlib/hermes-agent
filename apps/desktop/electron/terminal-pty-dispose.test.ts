@@ -120,19 +120,19 @@ test('an exited shell releases its PTY handle without waiting for tab dispose', 
   // …and once the exit is flushed the session is fully gone.
   const write = handles.map.get('hermes:terminal:write') as (event: unknown, id: string, data: string) => boolean
 
-  assert.equal(write({}, session.id, 'echo hi'), false)
+  assert.equal(write({ sender: { id: 7 } }, session.id, 'echo hi'), false)
 })
 
 test('explicit dispose kills the PTY and drops the session', async () => {
-  const { fake, session } = await startSession()
+  const { fake, session, sender } = await startSession()
 
   const dispose = handles.map.get('hermes:terminal:dispose') as (event: unknown, id: string) => boolean
 
-  assert.equal(dispose({}, session.id), true)
+  assert.equal(dispose({ sender }, session.id), true)
   assert.equal(fake.pty.kill.mock.calls.length >= 1, true)
 
   const write = handles.map.get('hermes:terminal:write') as (event: unknown, id: string, data: string) => boolean
 
-  assert.equal(write({}, session.id, 'echo hi'), false)
-  assert.equal(dispose({}, session.id), false)
+  assert.equal(write({ sender: { id: 7 } }, session.id, 'echo hi'), false)
+  assert.equal(dispose({ sender }, session.id), false)
 })

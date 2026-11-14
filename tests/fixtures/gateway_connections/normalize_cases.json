@@ -200,6 +200,50 @@
           "url": "http://b"
         }
       ]
+    },
+    "tunnel-url-port": {
+      "connections": [
+        {
+          "id": "remote",
+          "kind": "remote",
+          "label": "Remote",
+          "url": "http://backend:9119",
+          "authMode": "oauth",
+          "sshTunnel": {
+            "host": "alice@box:2222",
+            "remotePort": 7
+          }
+        }
+      ]
+    },
+    "tunnel-https-default": {
+      "connections": [
+        {
+          "id": "remote",
+          "kind": "remote",
+          "label": "Remote",
+          "url": "https://backend",
+          "authMode": "oauth",
+          "sshTunnel": {
+            "host": "box"
+          }
+        }
+      ]
+    },
+    "tunnel-legacy-alias": {
+      "connections": [
+        {
+          "id": "remote",
+          "kind": "remote",
+          "label": "Remote",
+          "url": "http://backend:9119",
+          "authMode": "oauth",
+          "terminalSsh": {
+            "host": "box",
+            "remotePort": 2
+          }
+        }
+      ]
     }
   },
   "saveRegistry": {
@@ -633,6 +677,80 @@
           "label": "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL 2",
           "url": "http://b",
           "authMode": "token"
+        }
+      ]
+    },
+    "tunnel-url-port": {
+      "version": 2,
+      "primary": "local",
+      "launchMode": "primary",
+      "lastUsed": "local",
+      "connections": [
+        {
+          "id": "local",
+          "kind": "local",
+          "label": "This device"
+        },
+        {
+          "id": "remote",
+          "kind": "remote",
+          "label": "Remote",
+          "url": "http://backend:9119",
+          "authMode": "oauth",
+          "sshTunnel": {
+            "host": "box",
+            "remotePort": 9119,
+            "user": "alice",
+            "port": 2222
+          }
+        }
+      ]
+    },
+    "tunnel-https-default": {
+      "version": 2,
+      "primary": "local",
+      "launchMode": "primary",
+      "lastUsed": "local",
+      "connections": [
+        {
+          "id": "local",
+          "kind": "local",
+          "label": "This device"
+        },
+        {
+          "id": "remote",
+          "kind": "remote",
+          "label": "Remote",
+          "url": "https://backend",
+          "authMode": "oauth",
+          "sshTunnel": {
+            "host": "box",
+            "remotePort": 443
+          }
+        }
+      ]
+    },
+    "tunnel-legacy-alias": {
+      "version": 2,
+      "primary": "local",
+      "launchMode": "primary",
+      "lastUsed": "local",
+      "connections": [
+        {
+          "id": "local",
+          "kind": "local",
+          "label": "This device"
+        },
+        {
+          "id": "remote",
+          "kind": "remote",
+          "label": "Remote",
+          "url": "http://backend:9119",
+          "authMode": "oauth",
+          "sshTunnel": {
+            "host": "box",
+            "remotePort": 9119
+          }
         }
       ]
     }

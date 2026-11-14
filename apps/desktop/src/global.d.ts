@@ -225,7 +225,7 @@ declare global {
       getConnectionConfig: (profile?: null | string) => Promise<DesktopConnectionConfig>
       saveConnectionConfig: (payload: DesktopConnectionConfigInput) => Promise<DesktopConnectionConfig>
       applyConnectionConfig: (payload: DesktopConnectionConfigInput) => Promise<DesktopConnectionConfig>
-      testConnectionConfig: (payload: DesktopConnectionConfigInput) => Promise<DesktopConnectionTestResult>
+      testConnectionConfig: (payload: DesktopConnectionConfigInput, options?: DesktopOauthLoginOptions) => Promise<DesktopConnectionTestResult>
       // Opt-in OS-keychain encryption for stored gateway secrets (default
       // off). `get` never touches the OS keychain; `set` re-encodes stored
       // secrets and can throw when the keychain is unusable.
@@ -265,7 +265,8 @@ declare global {
       }
       sshConfigHosts: () => Promise<DesktopSshHostsResult>
       sshResolveHost: (host: string) => Promise<DesktopSshResolveResult>
-      probeConnectionConfig: (remoteUrl: string) => Promise<DesktopConnectionProbeResult>
+      cancelConnectionDraft?: () => Promise<void>
+      probeConnectionConfig: (remoteUrl: string, options?: DesktopOauthLoginOptions) => Promise<DesktopConnectionProbeResult>
       oauthLoginConnectionConfig: (
         remoteUrl: string,
         options?: DesktopOauthLoginOptions
@@ -1133,6 +1134,8 @@ export interface HermesConnection {
   // The live, RESOLVED connection mode. Only ever 'local' or 'remote' — a
   // 'cloud' saved-config entry resolves to a 'remote' connection under the hood
   // (cloud-auto-discovery Q3/Q6), so this never carries 'cloud'.
+  canonicalBaseUrl?: string
+  sshTunnelGeneration?: string
   mode?: 'local' | 'remote'
   // 'native': this machine's gateway; no static token, per-call private grants.
   authMode?: 'native' | 'oauth' | 'token'
@@ -1299,6 +1302,8 @@ export interface DesktopRegistryConnection {
   kind: DesktopConnectionKind
   // Required, registry-unique device name ("Homelab", "Work laptop").
   label: string
+  sshTunnel?: { host: string; user?: string; port?: number; keyPath?: string; remotePort?: number }
+  sshTunnelError?: string
   url?: string
   authMode?: 'oauth' | 'token'
   org?: string
@@ -1342,6 +1347,8 @@ export interface DesktopRegistryConnectionInput {
   id?: string
   kind: DesktopConnectionKind
   label: string
+  /** remotePort is legacy compatibility input only; URL owns the backend port. */
+  sshTunnel?: null | { host: string; user?: string; port?: number; keyPath?: string; remotePort?: number }
   url?: string
   authMode?: 'oauth' | 'token'
   // Plaintext token to store (encrypted at rest); omit to keep the saved one.
@@ -1477,6 +1484,8 @@ export interface ExternalOpenFailedPayload {
 }
 
 export interface DesktopOauthLoginOptions {
+  /** remotePort is legacy compatibility input only; URL owns the backend port. */
+  sshTunnel?: null | { host: string; user?: string; port?: number; keyPath?: string; remotePort?: number }
   /**
    * Registry-draft identity for a sign-in that runs before the draft is
    * saved. The main process derives the login window's cookie partition from
