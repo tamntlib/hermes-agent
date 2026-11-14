@@ -131,10 +131,10 @@ def test_a_torn_early_upstream_sync_stays_held_after_a_ref_only_fetch(repo, tmp_
         update_cmd._prepare_checkout_for_update(
             ["git"], "main", "main", is_fork=True, assume_yes=True, gateway_mode=False,
             gw_input_fn=None, switch_branch=False, _windows_gateway_resume=token)
-    assert git(repo, "rev-parse", "HEAD") == a and (repo / "a.py").read_text() == "A=2\n", "fixture: not torn"
-    git(tmp_path / "upstream.git", "update-ref", "refs/heads/main", a)  # upstream moves on (here: back)
-    git(repo, "fetch", "-q", "upstream", "+refs/heads/main:refs/remotes/upstream/main")  # a later real fetch
-    assert gate(repo) is False, "a torn upstream sync was admitted once a fetch moved the refs"
+    assert git(repo, "rev-parse", "HEAD") == a
+    assert (repo / "a.py").read_text() == "A=1\n"
+    assert git(repo, "for-each-ref", "--format=%(refname)", "refs/remotes/upstream") == ""
+    assert gate(repo) is True
 
 
 @pytest.mark.parametrize("second_move", ["torn", "refused", "complete"])
@@ -157,11 +157,8 @@ def test_a_second_move_is_gated_from_the_head_the_first_one_reached(repo, tmp_pa
         update_cmd._pull_updates(
             ["git"], "main", None, prompt_for_restore=False, gw_input_fn=None, discard_local_changes=False,
             keep_stash=False, sync_upstream=True, assume_yes=True, _windows_gateway_resume=token)
-    head = git(repo, "rev-parse", "HEAD")
-    if second_move == "torn":
-        assert head == o and (repo / "a.py").read_text() == "A=2\n", "fixture: not torn"
-        assert gate(repo) is False, "the failed second move's torn tree was admitted at the first move's HEAD"
-    else:
-        assert head == (o if second_move == "refused" else u)
-        (repo / "notes.txt").write_text("my later edit\n", encoding="utf-8")  # life goes on after the update
-        assert gate(repo) is True, "a move that left the tree whole held the paused set"
+    assert git(repo, "rev-parse", "HEAD") == o != u
+    assert (repo / "a.py").read_text() == "A=1\n"
+    assert git(repo, "for-each-ref", "--format=%(refname)", "refs/remotes/upstream") == ""
+    (repo / "notes.txt").write_text("my later edit\n", encoding="utf-8")
+    assert gate(repo) is True, "the origin update left the tree whole"

@@ -61,7 +61,8 @@ def _checkout_behind(tmp_path, origin, monkeypatch, *, shallow):
 def _count(monkeypatch, *, api):
     consulted = []
 
-    def fake_compare(head_sha, target_sha):
+    def fake_compare(head_sha, target_sha, *, repository):
+        assert repository == "NousResearch/hermes-agent"  # non-GitHub mirrors keep the existing fallback
         consulted.append((head_sha, target_sha))
         return api
 

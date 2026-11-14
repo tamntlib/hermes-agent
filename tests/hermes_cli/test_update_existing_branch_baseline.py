@@ -167,8 +167,7 @@ def test_stale_local_main_can_catch_up_to_original_detached_tip(checkout):
     assert git(root, "rev-parse", "main") == tip
 
 
-@pytest.mark.parametrize("upstream_result", ["original", "unchanged", "wrong-branch", "reverted"])
-def test_fork_sync_after_stale_branch_repair(checkout, monkeypatch, upstream_result):
+def test_fork_sync_after_stale_branch_repair(checkout, monkeypatch):
     root, old, tip = checkout
     git(root, "checkout", "-q", "main")
     git(root, "commit", "--allow-empty", "-qm", "upstream")
@@ -177,26 +176,12 @@ def test_fork_sync_after_stale_branch_repair(checkout, monkeypatch, upstream_res
     git(root, "branch", "-f", "main", old)
     plan = prepare(root)
 
-    def sync(*args, **kwargs):
-        assert git(root, "rev-parse", "HEAD") == tip
-        if upstream_result == "original":
-            git(root, "merge", "--ff-only", upstream_tip)
-        elif upstream_result == "wrong-branch":
-            git(root, "checkout", "-qb", "wrong")
-        elif upstream_result == "reverted":
-            git(root, "reset", "--hard", old)
-        return True
-
-    monkeypatch.setattr(update_cmd._m(), "_sync_with_upstream_if_needed", sync)
-    if upstream_result in {"wrong-branch", "reverted"}:
-        with pytest.raises(SystemExit) as exc:
-            pull(plan, sync_upstream=True)
-        assert exc.value.code == 1
-    else:
-        request = complete(plan, pull(plan, sync_upstream=True), monkeypatch)
-        assert request["expected_sha"] == (upstream_tip if upstream_result == "original" else tip)
-        assert git(root, "rev-parse", "main") == (upstream_tip if upstream_result == "original" else tip)
-        assert git(root, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    monkeypatch.setattr(update_cmd._m(), "_sync_with_upstream_if_needed",
+                        lambda *a, **k: pytest.fail("updater must not sync upstream"))
+    request = complete(plan, pull(plan, sync_upstream=True), monkeypatch)
+    assert request["expected_sha"] == tip
+    assert git(root, "rev-parse", "main") == tip
+    assert git(root, "rev-parse", "--abbrev-ref", "HEAD") == "main"
 
 
 def test_early_fork_sync_without_push_still_completes(checkout, monkeypatch):
@@ -207,18 +192,12 @@ def test_early_fork_sync_without_push_still_completes(checkout, monkeypatch):
     git(root, "checkout", "-q", "--detach", tip)
     git(root, "branch", "-f", "main", tip)
 
-    def sync(*args, **kwargs):
-        git(root, "merge", "--ff-only", upstream_tip)
-        # Successful local sync need not push the new SHA to origin.
-        return True
-
-    monkeypatch.setattr(update_cmd._m(), "_sync_with_upstream_if_needed", sync)
+    monkeypatch.setattr(update_cmd._m(), "_sync_with_upstream_if_needed",
+                        lambda *a, **k: pytest.fail("updater must not sync upstream"))
     plan = prepare(root, is_fork=True)
-    assert plan.upstream_checked
-    assert git(root, "rev-parse", "HEAD") == upstream_tip
+    assert plan.commit_count == 0
+    assert git(root, "rev-parse", "HEAD") == tip != upstream_tip
     assert git(root, "rev-parse", "origin/main") == tip
-    request = complete(plan, pull(plan, sync_upstream=True), monkeypatch)
-    assert request["expected_sha"] == upstream_tip
 
 
 def test_command_hands_off_after_existing_main_switch(update_tree, monkeypatch, capsys):
@@ -266,15 +245,12 @@ def test_fork_sync_round_trip_is_not_misclassified_as_noop(tmp_path, monkeypatch
     assert plan.pre_sync_sha == upstream_tip
     assert git(root, "rev-parse", "HEAD") == old
 
-    def sync_upstream(*_args, **_kwargs):
-        git(root, "merge", "--ff-only", "refs/remotes/upstream/main")
-        return True
-
-    monkeypatch.setattr(update_cmd._m(), "_sync_with_upstream_if_needed", sync_upstream)
+    monkeypatch.setattr(update_cmd._m(), "_sync_with_upstream_if_needed",
+                        lambda *a, **k: pytest.fail("updater must not sync upstream"))
     pull(plan, sync_upstream=True)
 
-    assert git(root, "rev-parse", "HEAD") == upstream_tip
-    assert git(root, "rev-parse", "main") == upstream_tip
+    assert git(root, "rev-parse", "HEAD") == fork_tip
+    assert git(root, "rev-parse", "main") == fork_tip
     assert git(root, "rev-parse", "--abbrev-ref", "HEAD") == "main"
 
 

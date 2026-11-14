@@ -995,10 +995,6 @@ def _refuse_unselected_head(git_cmd, target_sha: str, unmoved: str | None) -> No
         sys.exit(1)
 
 
-def _upstream_broken_header(broken) -> str:
-    return f"✗ upstream/main ({broken.sha[:10]}) has a syntax error in a critical file; it was not merged:"
-
-
 def _update_movement_baseline(git_cmd, pre_pull_sha, pre_sync_sha, rollback_branch, target_sha):
     """Distinguish a branch awaiting repair from an already-applied early sync."""
     if rollback_branch is not None and pre_pull_sha and target_sha:
@@ -1113,23 +1109,6 @@ def _pull_updates(
                 _commit.owe_restore_of(_m().PROJECT_ROOT, pre_pull_sha)
             raise
         pull_marker.unlink(missing_ok=True)  # git exited 0: the tree is whole at the target
-        if sync_upstream:
-            # Do not let a second mutation hide a failed origin merge or move an
-            # unexpected branch. Keep local edits parked through the final check.
-            _verify_head_after_pull(
-                git_cmd, branch, movement_baseline, in_place_update=in_place_update,
-                _windows_gateway_resume=_windows_gateway_resume)
-            try:
-                _m()._sync_with_upstream_if_needed(
-                    git_cmd, _m().PROJECT_ROOT, assume_yes=assume_yes, input_fn=gw_input_fn,
-                    checkout_move=_moves_for(_windows_gateway_resume))
-            except UpstreamTargetBroken as broken:  # refused before its move: the update rolls back
-                _verify_head_after_pull(  # never reset an unexpected branch's ref onto pre
-                    git_cmd, branch, movement_baseline, in_place_update=in_place_update,
-                    _windows_gateway_resume=_windows_gateway_resume)
-                _roll_back_broken_update(git_cmd, pre_sync_sha or pre_pull_sha, broken.path, broken.error,
-                                         rollback_branch=rollback_branch, header=_upstream_broken_header(broken),
-                                         _windows_gateway_resume=_windows_gateway_resume)
         # Refuse an unexpected branch before syntax rollback can reset its ref.
         _verify_head_after_pull(
             git_cmd, branch, movement_baseline, in_place_update=in_place_update,
@@ -1137,9 +1116,6 @@ def _pull_updates(
         _rollback_if_pulled_syntax_error(
             git_cmd, pre_sync_sha or pre_pull_sha, rollback_branch=rollback_branch,
             _windows_gateway_resume=_windows_gateway_resume)
-        if sync_upstream:
-            # Only a validated update is published to the fork (#97052 sync, after the commit point).
-            _push_synced_fork(git_cmd, _m().PROJECT_ROOT)
         update_succeeded = True
     finally:
         if auto_stash_ref is not None:
@@ -1417,7 +1393,10 @@ def _prepare_checkout_for_update(
     apply_is_shallow = _is_shallow_checkout(git_cmd)
     if commit_count > 0 and apply_is_shallow:
         from hermes_cli.source_check import _github_compare_behind
-        counted = _github_compare_behind(*_tip_shas(git_cmd, target_ref, base))
+        from hermes_cli.source_releases import source_repository
+        counted = _github_compare_behind(
+            *_tip_shas(git_cmd, target_ref, base),
+            repository=source_repository(git_cmd, _m().PROJECT_ROOT))
         # counted == 0 means local-ahead: falls through to the up-to-date path.
         commit_count = counted if counted is not None else -1
 
@@ -1440,28 +1419,6 @@ def _prepare_checkout_for_update(
     # "Already up to date!" and verified nothing). Non-fork checkouts have no upstream question: origin IS
     # the official repo, so "Already up to date!" is fully verified there.
     upstream_checked = True
-    if commit_count == 0 and is_fork and branch == "main" and not release_tag:
-        pre_sync_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT)
-        try:
-            upstream_checked = _m()._sync_with_upstream_if_needed(
-                git_cmd, _m().PROJECT_ROOT, assume_yes=assume_yes, input_fn=gw_input_fn,
-                checkout_move=_moves_for(_windows_gateway_resume))
-        except UpstreamTargetBroken as broken:  # nothing moved; local edits stay parked, like a rollback
-            if auto_stash_ref is not None:
-                print(f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})")
-                print("  Restore manually with: git stash apply")
-                _clear_pending_autostash()
-            _roll_back_broken_update(git_cmd, pre_sync_sha, broken.path, broken.error,
-                                     header=_upstream_broken_header(broken),
-                                     _windows_gateway_resume=_windows_gateway_resume,
-                                     stop_class="target_syntax_error")
-        post_sync_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT)
-        if pre_sync_sha and post_sync_sha and pre_sync_sha != post_sync_sha:
-            synced_count = _count_commits_between(
-                git_cmd, _m().PROJECT_ROOT, pre_sync_sha, post_sync_sha)
-            # HEAD moving is proof of an update even if the count can't be read.
-            commit_count = max(1, synced_count)
-            moved_from_sha = moved_from_sha or pre_sync_sha
 
     return _CheckoutPlan(
         auto_stash_ref=auto_stash_ref, commit_count=commit_count, in_place_update=in_place_update,
@@ -1939,7 +1896,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             gw_input_fn=gw_input_fn, discard_local_changes=opts.discard_local_changes,
             keep_stash=opts.keep_stash, target_ref=target_ref, pre_sync_sha=_plan.pre_sync_sha,
             rollback_branch=_plan.rollback_branch,
-            sync_upstream=is_fork and branch == "main" and not release_sha, assume_yes=assume_yes,
+            assume_yes=assume_yes,
             in_place_update=_plan.in_place_update, _windows_gateway_resume=_windows_gateway_resume,
             expected_sha=completion_request.get("expected_sha"))
         _apply_pulled_update(
