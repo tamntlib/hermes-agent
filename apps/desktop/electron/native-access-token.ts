@@ -2,6 +2,8 @@ import type { NativeTokenSet } from './native-oauth'
 
 export interface NativeAccessTokenOptions {
   forceRefresh?: boolean
+  /** Internal main-process transport; persistence remains keyed by canonical base URL. */
+  transportBaseUrl?: string
   /** A late 401 must reuse a concurrent rotation rather than rotate its winner again. */
   rejectedAccessToken?: string
 }
@@ -12,7 +14,7 @@ export interface NativeAccessTokenCoordinatorDeps {
   loadTokens: (baseUrl: string) => NativeTokenSet | null
   normalizeBaseUrl: (baseUrl: string) => string
   nowSeconds?: () => number
-  refreshTokens: (baseUrl: string, tokens: NativeTokenSet) => Promise<NativeTokenSet>
+  refreshTokens: (baseUrl: string, tokens: NativeTokenSet, transportBaseUrl?: string) => Promise<NativeTokenSet>
   storeTokens: (baseUrl: string, tokens: NativeTokenSet) => void
   tokenNeedsRefresh: (tokens: NativeTokenSet, nowSeconds: number) => boolean
 }
@@ -87,7 +89,9 @@ export function createNativeAccessTokenCoordinator(deps: NativeAccessTokenCoordi
       let rotated: NativeTokenSet
 
       try {
-        rotated = await deps.refreshTokens(baseUrl, tokens)
+        rotated = options.transportBaseUrl
+          ? await deps.refreshTokens(baseUrl, tokens, options.transportBaseUrl)
+          : await deps.refreshTokens(baseUrl, tokens)
       } catch (error) {
         assertCurrent()
 

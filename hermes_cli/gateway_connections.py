@@ -362,6 +362,8 @@ def dial_snapshot(connection_id: str) -> dict:
     else: credentials read by id in a second lookup can belong to an address the entry was
     re-pointed to meanwhile."""
     entry = _entry(connection_id)
+    if entry.get("sshTunnel") or entry.get("sshTunnelError"):
+        raise ConnectionStoreError("This Gateway uses a Desktop SSH tunnel. Open it in Desktop.")
     secret = _secret_of(entry)
     return {"entry": entry, "url": _entry_url(entry), "token": secret["token"], "headers": secret["headers"],
             "tokens": _tokens_of(entry) if entry.get("authMode") == "oauth" else None}

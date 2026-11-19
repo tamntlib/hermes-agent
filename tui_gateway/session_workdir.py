@@ -565,6 +565,11 @@ def _workdir_row_model_config(session: dict) -> tuple[str, dict]:
                 model_config["provider"] = healed
         except Exception:
             logger.debug("custom provider identity recovery failed (db row)", exc_info=True)
+    if (agent := session.get("agent")) is not None:
+        # Eager builds have no first-submit row to update at attach time. Persist
+        # the actual route on insertion, never credentials or a guessed sibling.
+        model_config = _runtime_model_config(agent, model_config)
+        row_model = model_config.get("model") or row_model
     if (reasoning := session.get("create_reasoning_override")) is not None:
         model_config["reasoning_config"] = reasoning
     if (service_tier := session.get("create_service_tier_override")) is not None:

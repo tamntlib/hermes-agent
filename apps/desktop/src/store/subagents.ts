@@ -2,6 +2,8 @@ import { atom } from 'nanostores'
 
 import { capitalize } from '@/lib/text'
 
+import type { SessionOwnerScope } from './session-request-router'
+
 export type SubagentStatus = 'completed' | 'failed' | 'interrupted' | 'queued' | 'running'
 export type SubagentStreamKind = 'progress' | 'summary' | 'thinking' | 'tool'
 
@@ -58,6 +60,24 @@ export const $subagentsBySession = atom<Record<string, SubagentProgress[]>>({})
 // Clearing the session (or resetting the store) releases this history too.
 const retiredSubagents = new WeakMap<SubagentProgress[], Set<string>>()
 
+// Runtime eviction must not strand its still-displayed children. Retain only
+// the proven read route, with the row array's lifetime (never an ambient owner).
+const retainedOwners = new WeakMap<SubagentProgress[], SessionOwnerScope>()
+
+export function retainSubagentOwner(sid: string, owner: SessionOwnerScope) {
+  const rows = $subagentsBySession.get()[sid]
+
+  if (owner && rows && activeSubagentCount(rows) > 0) {
+    retainedOwners.set(rows, typeof owner === 'string' ? owner : { ...owner })
+  }
+}
+
+export function retainedSubagentOwner(sid: string): SessionOwnerScope {
+  const rows = $subagentsBySession.get()[sid]
+
+  return rows ? retainedOwners.get(rows) : undefined
+}
+
 function setSessionSubagents(sid: string, previous: SubagentProgress[], next: SubagentProgress[]) {
   const retired = retiredSubagents.get(previous) ?? new Set<string>()
 
@@ -69,6 +89,12 @@ function setSessionSubagents(sid: string, previous: SubagentProgress[], next: Su
 
   if (retired.size) {
     retiredSubagents.set(next, retired)
+  }
+
+  const owner = retainedOwners.get(previous)
+
+  if (owner && activeSubagentCount(next) > 0) {
+    retainedOwners.set(next, owner)
   }
 
   $subagentsBySession.set({ ...$subagentsBySession.get(), [sid]: next })
@@ -314,6 +340,33 @@ export function reconcileSubagentSnapshot(
   }
 
   if (next.length !== previous.length || next.some((item, index) => item !== previous[index])) {
+    setSessionSubagents(sid, previous, next)
+  }
+}
+
+/** A backend-wide roster can retire known native workers, but must not import
+ * other sessions' workers or infer the fate of queued/tool-lifecycle rows. */
+export function reconcileSubagentRegistry(sid: string, active: unknown) {
+  if (
+    !Array.isArray(active) ||
+    active.some(item => !item || typeof item.subagent_id !== 'string' || !item.subagent_id)
+  ) {
+    return
+  }
+
+  const previous = $subagentsBySession.get()[sid]
+
+  if (!previous) {
+    return
+  }
+
+  const ids = new Set(active.map(item => item.subagent_id))
+
+  const next = previous.filter(
+    item => item.status !== 'running' || item.id.startsWith('delegate-tool:') || ids.has(item.id)
+  )
+
+  if (next.length !== previous.length) {
     setSessionSubagents(sid, previous, next)
   }
 }

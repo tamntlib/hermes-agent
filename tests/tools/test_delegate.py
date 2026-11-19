@@ -37,7 +37,7 @@ def _make_mock_parent(depth=0):
     parent.provider = "openrouter"
     parent.api_mode = "chat_completions"
     parent.model = "anthropic/claude-sonnet-4"
-    parent.platform = "cli"
+    parent.platform, parent.service_tier = "cli", None
     parent.providers_allowed = None
     parent.providers_ignored = None
     parent.providers_order = None
@@ -1807,7 +1807,7 @@ class TestOrchestratorEndToEnd(unittest.TestCase):
                 m._active_children = []
                 m._active_children_lock = threading.Lock()
                 m._session_db = None
-                m.platform = "cli"
+                m.platform, m.service_tier = "cli", kw.get("service_tier")
                 m.enabled_toolsets = ["terminal", "file", "delegation"]
                 m.api_key = "***"
                 m.base_url = ""

@@ -1,0 +1,73 @@
+name: v0.23.2 Desktop renderer typecheck
+
+on:
+  push:
+    branches: [ci/v0.23.2-renderer-typecheck]
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_TREE: fe3bdf4b38e40db721bd533fcea84e57e59b8ce7
+
+jobs:
+  renderer-typecheck:
+    if: github.repository == 'tamntlib/hermes-agent'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify and export the exact candidate
+        shell: bash
+        run: |
+          index_dir=$(mktemp -d "$RUNNER_TEMP/candidate-index.XXXXXX")
+          trap 'rm -rf -- "$index_dir"' EXIT
+          export GIT_INDEX_FILE="$index_dir/index"
+          git read-tree HEAD
+          # The disposable branch adds only this CI entry point to the candidate.
+          git update-index --force-remove -- .github/workflows/v0232-renderer-typecheck.yml
+          tree=$(git write-tree)
+          printf 'CI commit: %s\nCandidate tree: %s\n' "$(git rev-parse HEAD)" "$tree"
+          if [[ "$tree" != "$CANDIDATE_TREE" ]]; then
+            printf '::error::Expected candidate tree %s, got %s\n' "$CANDIDATE_TREE" "$tree"
+            exit 1
+          fi
+          mkdir "$RUNNER_TEMP/candidate-src"
+          git archive "$tree" | tar -x -C "$RUNNER_TEMP/candidate-src"
+
+      - name: Typecheck the full Desktop renderer in Docker
+        shell: bash
+        run: |
+          docker run --rm --interactive --init --cpus=2 --memory=6g --memory-swap=6g \
+            --user "$(id -u):$(id -g)" \
+            --env CI=true --env HOME=/tmp --env HERMES_HOME=/tmp/hermes \
+            --env NODE_OPTIONS=--max-old-space-size=4608 \
+            --mount "type=bind,src=$RUNNER_TEMP/candidate-src,dst=/src" --workdir /src \
+            python:3.14-slim-bookworm@sha256:3fe1a0b6c2d6b2ebb572906cdabeca75aeb558c0c17db5ffefbcf8094871c32b \
+            bash -euo pipefail -s <<'BASH'
+          printf 'Memory limit (bytes): '; cat /sys/fs/cgroup/memory.max
+          printf 'CPU quota and period: '; cat /sys/fs/cgroup/cpu.max
+          python -u - <<'PYTHON'
+          import os
+
+          from pm.install import ensure
+
+          print("Installing the locked Node and pnpm toolchain")
+          pnpm = ensure("pnpm", explicit=True)
+          pnpm.run(["node", "--version"], check=True)
+          pnpm.run(["pnpm", "--version"], check=True)
+          print("Installing the locked Desktop and tests-js workspace dependencies")
+          pnpm.run([
+              "pnpm", "install", "--frozen-lockfile", "--trust-lockfile", "--prod=false",
+              "--ignore-scripts", "--filter", "{./apps/desktop}...", "--filter", "{./tests-js}...",
+          ], check=True)
+
+          os.chdir("apps/desktop")
+          pnpm.run(["pnpm", "exec", "tsc", "--version"], check=True)
+          print("Running tsc against the unmodified full renderer project")
+          os.execvpe("pnpm", ["pnpm", "exec", "tsc", "-p", "tsconfig.json", "--noEmit"], pnpm.env)
+          PYTHON
+          BASH

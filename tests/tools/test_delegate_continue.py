@@ -42,6 +42,7 @@ class _ScriptedModel:
         child = MagicMock()
         child.session_id = kw.get("session_id") or f"child-sess-{len(self.builds)}"
         child.model, child.provider = kw.get("model"), kw.get("provider")
+        child.service_tier = kw.get("service_tier")
         child._parent_session_id = kw.get("parent_session_id")  # the ownership spine, as AIAgent stamps it
         child.get_activity_summary.return_value = {"api_call_count": 1, "current_tool": None, "last_activity_ts": 0}
         db = kw["session_db"]
@@ -64,6 +65,7 @@ def _parent(session_id="parent-sess", db=None):
     parent = MagicMock()
     parent.base_url, parent.api_key, parent.provider = "https://openrouter.ai/api/v1", "parent-key", "openrouter"
     parent.api_mode, parent.model, parent.platform = "chat_completions", "parent-model", "cli"
+    parent.service_tier = None
     parent.providers_allowed = parent.providers_ignored = parent.providers_order = parent.provider_sort = None
     parent.session_id, parent._delegate_depth, parent._interrupt_requested = session_id, 0, False
     parent.enabled_toolsets, parent.disabled_toolsets = ["terminal", "file", "web"], []

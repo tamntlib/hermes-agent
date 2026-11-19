@@ -6,9 +6,24 @@
 // (tool JSON, shell commands) as the session name.
 import { describe, expect, it } from 'vitest'
 
-import { searchResultToSession } from './index'
+import { searchResultToSession } from './search-results'
 
 describe('searchResultToSession', () => {
+  it('preserves the request owner of an unloaded search hit', () => {
+    const hit = {
+      session_id: 'unloaded',
+      model: null,
+      role: null,
+      session_started: 1,
+      snippet: '',
+      source: 'cli',
+      profile: 'work',
+      connection_id: 'vps'
+    }
+
+    expect(searchResultToSession(hit)).toMatchObject({ profile: 'work', connection_id: 'vps' })
+  })
+
   it('uses the backend-provided title for the synthesized row', () => {
     const s = searchResultToSession({
       lineage_root: 'root-1',

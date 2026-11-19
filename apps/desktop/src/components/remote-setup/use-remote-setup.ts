@@ -87,6 +87,7 @@ export function useRemoteSetup(options: RemoteSetupOptions): RemoteSetup {
 
   const { probe, probeStatus, targetSeq, invalidateProbe, acceptProbe } = useRemoteProbe({
     enabled: probeEnabled,
+    identity: options.oauthLoginIdentity?.(),
     url,
     revision,
     onReset: (): void => {
@@ -131,6 +132,7 @@ export function useRemoteSetup(options: RemoteSetupOptions): RemoteSetup {
   const connectionTest: RemoteConnectionTest = useRemoteConnectionTest({
     host,
     url,
+    identity: options.oauthLoginIdentity?.(),
     payload,
     canTest,
     authResolved,

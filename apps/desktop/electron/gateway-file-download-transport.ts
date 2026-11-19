@@ -12,6 +12,8 @@ import { destroyStalledBody, finalizeGatewayDownload, type StallWatchableBody } 
 import { DEFAULT_FETCH_TIMEOUT_MS, resolveTimeoutMs } from './hardening'
 
 export interface GatewayDownloadOptions {
+  signal?: AbortSignal
+  agent?: http.Agent
   bearer?: string
   timeoutMs?: number
   /** Idle deadline for a body being read (reset per chunk); defaults to the fetch timeout. */
@@ -53,7 +55,8 @@ export function downloadViaTokenToFile(
     const request: http.ClientRequest = client.request(
       parsed,
       {
-        agent: downloadAgentFor(parsed.protocol),
+        agent: options.agent || downloadAgentFor(parsed.protocol),
+        signal: options.signal,
         method: 'GET',
         headers: options.bearer
           ? { Authorization: `Bearer ${options.bearer}` }

@@ -56,7 +56,7 @@ def test_bounded_fast_window_policy(monkeypatch):
         api_mode="anthropic_messages",
     )
     fast_mode.begin_turn(anth, conversation_history=[])
-    assert fast_mode.effective_request_overrides(anth)["speed"] == "fast"
+    assert fast_mode.effective_request_overrides(anth)["service_tier"] == "priority"
 
     # unsupported routes never get fast params, in auto or static mode
     from hermes_cli.models import resolve_fast_mode_overrides
@@ -71,8 +71,8 @@ def test_bounded_fast_window_policy(monkeypatch):
     ):
         proxied = _agent(provider=provider, base_url=base_url)
         fast_mode.begin_turn(proxied, conversation_history=[])
-        assert "service_tier" not in fast_mode.effective_request_overrides(proxied), provider
-        assert resolve_fast_mode_overrides("gpt-5.4", provider=provider, base_url=base_url) is None
+        assert fast_mode.effective_request_overrides(proxied)["service_tier"] == "priority", provider
+        assert resolve_fast_mode_overrides("gpt-5.4", provider=provider, base_url=base_url) == {"service_tier": "priority"}
     assert resolve_fast_mode_overrides(
         "claude-opus-5", provider="bedrock", base_url="https://bedrock-runtime.us-east-1.amazonaws.com"
     ) is None
@@ -140,7 +140,7 @@ def test_fast_auto_and_cold_parse_and_slash_command(monkeypatch):
     }
     route_stub.base_url = "https://openrouter.ai/api/v1"
     route_stub.provider = "openrouter"
-    assert cli_mod.HermesCLI._resolve_turn_agent_config(route_stub, "hi")["request_overrides"] is None
+    assert cli_mod.HermesCLI._resolve_turn_agent_config(route_stub, "hi")["request_overrides"] == {"service_tier": "priority"}
 
 
 class _FastRateLimitError(Exception):

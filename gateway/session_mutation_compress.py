@@ -69,23 +69,35 @@ async def prepare_compress(authority, live, payload, prepared):
     def summarize():
         with policy_scope(policy, authority=authority):
             from agent.conversation_compression import _pre_compress_memory_context
-            memory_context = _pre_compress_memory_context(resident, head, False) if resident is not None else ''
-            engine = _plugin_engine(authority, policy, config, model, runtime, resident, snapshot['target'])
-            if engine is not None:
-                try:
-                    return _engine_compress(engine, head, tail, messages, request, memory_context), engine
-                except BaseException:
-                    if resident is None:
-                        _end_engine(engine, snapshot['target'], messages)
-                    raise
-            compressor = ContextCompressor(model, base_url=runtime.get('base_url') or '',
-                api_key=runtime.get('api_key') or '', provider=runtime.get('provider') or '',
-                api_mode=runtime.get('api_mode') or '', quiet_mode=True, abort_on_summary_failure=True,
-                protect_first_n=options.get('protect_first_n', 3), protect_last_n=options.get('protect_last_n', 20),
-                min_tail_user_messages=max(1, _parse_config_int(options.get('min_tail_user_messages', 1), 1)),
-                custom_providers=config.get('custom_providers'))
-            compressed = compressor.compress(json.loads(json.dumps(head)), force=True,
-                                               focus_topic=request.focus_topic, memory_context=memory_context)
+            # This fresh compressor runs after the turn's runtime scope has ended. Bind the
+            # resolved route, never infer a named provider from a shared endpoint/model.
+            from agent.auxiliary_client import set_runtime_main, reset_runtime_main
+            token = set_runtime_main(runtime.get('provider') or '', model,
+                requested_provider=runtime.get('requested_provider') or '',
+                base_url=runtime.get('base_url') or '', api_key=runtime.get('api_key') or '',
+                api_mode=runtime.get('api_mode') or '', auth_mode=runtime.get('auth_mode') or '',
+                session_id=snapshot['target'])
+            try:
+                memory_context = _pre_compress_memory_context(resident, head, False) if resident is not None else ''
+                engine = _plugin_engine(authority, policy, config, model, runtime, resident, snapshot['target'])
+                if engine is not None:
+                    try:
+                        return _engine_compress(engine, head, tail, messages, request, memory_context), engine
+                    except BaseException:
+                        if resident is None:
+                            _end_engine(engine, snapshot['target'], messages)
+                        raise
+                compressor = ContextCompressor(model, base_url=runtime.get('base_url') or '',
+                    api_key=runtime.get('api_key') or '', provider=runtime.get('provider') or '',
+                    api_mode=runtime.get('api_mode') or '', quiet_mode=True, abort_on_summary_failure=True,
+                    protect_first_n=options.get('protect_first_n', 3), protect_last_n=options.get('protect_last_n', 20),
+                    min_tail_user_messages=max(1, _parse_config_int(options.get('min_tail_user_messages', 1), 1)),
+                    custom_providers=config.get('custom_providers'))
+                compressor.bind_session_state(session_db=authority.db, session_id=snapshot['target'])
+                compressed = compressor.compress(json.loads(json.dumps(head)), force=True,
+                                                   focus_topic=request.focus_topic, memory_context=memory_context)
+            finally:
+                reset_runtime_main(token)
             if not any(m.get('_compressed_summary') for m in compressed):
                 return None, compressor
             return rejoin_compressed_head_and_tail(compressed, tail), compressor

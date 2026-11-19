@@ -1230,14 +1230,9 @@ def _strip_vendor_prefix(model_id: str) -> str:
 
 def model_supports_fast_mode(model_id: Optional[str], *, provider: Optional[str] = None, base_url: Optional[str] = None) -> bool:
     """Whether to expose /fast for this model; a Bedrock-only one only on the route its request builder tiers."""
-    from agent.model_metadata import is_grok_46_family
     if model_id in BEDROCK_ULTRAFAST_ROUTES:
         return normalize_provider(provider) == "bedrock" and bedrock_fast_mode_overrides(model_id, base_url, "ultrafast") is not None
-    return (
-        _is_anthropic_fast_model(model_id)
-        or _is_openai_fast_model(model_id)
-        or is_grok_46_family(str(model_id or "")))
-
+    return bool(model_id)
 
 def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
     """Accepts the Anthropic Fast Mode ``speed`` param (Opus 4.8 / Opus 5 / Opus 5.5 only) —
@@ -1287,11 +1282,11 @@ def resolve_fast_mode_overrides(
         return bedrock_fast_mode_overrides(model_id, base_url, tier)
     if not model_supports_fast_mode(model_id):
         return None
-    if (provider or base_url) and not _fast_mode_route_supported(model_id, provider, base_url):
+    if tier == "ultrafast" and (provider or base_url) and not _fast_mode_route_supported(model_id, provider, base_url):
         return None
     if tier == "ultrafast":
         return {"service_tier": "ultrafast"} if model_supports_ultrafast(model_id) else None
-    return {"speed": "fast"} if _is_anthropic_fast_model(model_id) else {"service_tier": "priority"}
+    return {"service_tier": "priority"}
 
 
 def _model_dedup_key(model_id: str) -> str:

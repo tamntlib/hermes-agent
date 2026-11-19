@@ -70,6 +70,10 @@ export async function resolveSiblingWsUrl(
     )
   }
 
+  if (connectionId && (!desktop.getConnectionFor || !desktop.getGatewayWsUrlFor)) {
+    throw new Error('The selected Gateway stream bridge is unavailable.')
+  }
+
   const conn =
     connectionId && desktop.getConnectionFor
       ? await withTimeout(
@@ -97,6 +101,9 @@ export async function resolveSiblingWsUrl(
   )
 
   const url = new URL(wsUrl)
+
+  if (conn.sshTunnelGeneration && new URL(conn.baseUrl).host !== url.host)
+    {throw new Error('SSH Gateway changed while opening the stream.')}
 
   if (!url.pathname.endsWith('/api/ws')) {
     throw new Error(`Unexpected gateway WebSocket path: ${url.pathname}`)

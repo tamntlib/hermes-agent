@@ -60,6 +60,77 @@ beforeEach(() => {
 })
 
 describe('a terminal tab owns the gateway it was opened on', () => {
+  it.each(['default', 'work'])('pins a tunneled Remote Gateway before start and retry in %s', async profile => {
+    const stores = await loadStores()
+    const { $activeGatewayProfile } = await import('@/store/profile')
+    $activeGatewayProfile.set(profile)
+    stores.$connectionsRegistry.set({
+      version: 2,
+      primary: 'local',
+      secureTokenStorage: false,
+      connections: [
+        { id: 'local', kind: 'local', label: 'This device', tokenSet: false, tokenPreview: null },
+        {
+          id: 'vps',
+          kind: 'remote',
+          label: 'VPS',
+          url: 'https://gateway.example',
+          sshTunnel: { host: 'vps.example' },
+          tokenSet: false,
+          tokenPreview: null
+        }
+      ]
+    })
+    stores.$connection.set({ connectionId: 'vps' } as never)
+
+    const id = stores.createTerminal('/repo')
+    expect(stores.$terminals.get().find(term => term.id === id)).toMatchObject({ connectionId: 'vps', profile })
+    const start = vi.fn().mockRejectedValueOnce(new Error('VPS offline')).mockResolvedValue(session('vps'))
+    const { controller, write } = controllerFor(stores, id, start)
+
+    controller.start()
+    await waitFor(() => expect(write).toHaveBeenCalled())
+    expect(start.mock.calls[0]![0]).toMatchObject({ connectionId: 'vps', profile })
+    stores.$connection.set({ connectionId: 'local' } as never)
+    $activeGatewayProfile.set('other')
+    controller.input('\r')
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(2))
+    controller.release()
+
+    expect(start.mock.calls[1]![0]).toMatchObject({ connectionId: 'vps', profile })
+  })
+
+  it('keeps a restored explicitly local tab local when a tunneled gateway is selected', async () => {
+    let stores = await loadStores()
+    const id = stores.createTerminal('/repo', { connectionId: 'local' })
+    stores = await loadStores()
+    stores.$connectionsRegistry.set({
+      version: 2,
+      primary: 'vps',
+      secureTokenStorage: false,
+      connections: [
+        { id: 'local', kind: 'local', label: 'This device', tokenSet: false, tokenPreview: null },
+        {
+          id: 'vps',
+          kind: 'remote',
+          label: 'VPS',
+          sshTunnel: { host: 'vps.example' },
+          tokenSet: false,
+          tokenPreview: null
+        }
+      ]
+    })
+    stores.$connection.set({ connectionId: 'vps' } as never)
+    const start = vi.fn().mockResolvedValue(session('local'))
+    const { controller } = controllerFor(stores, id, start)
+
+    controller.start()
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(1))
+    controller.release()
+
+    expect(start.mock.calls[0]![0].connectionId).toBe('local')
+  })
+
   it('a failed first start retries on the same gateway after a Sessions pick', async () => {
     const stores = await loadStores()
     stores.$connectionsRegistry.set(registryWith({ host: 'nas.example', id: 'nas' }))
