@@ -38,6 +38,16 @@ jobs:
           mkdir "$RUNNER_TEMP/candidate-src"
           git archive "$tree" | tar -x -C "$RUNNER_TEMP/candidate-src"
 
+      - name: Prepare the Docker image with Node's runtime library
+        shell: bash
+        run: |
+          docker build --tag hermes-v0232-renderer-ci - <<'DOCKERFILE'
+          FROM python:3.14-slim-bookworm@sha256:3fe1a0b6c2d6b2ebb572906cdabeca75aeb558c0c17db5ffefbcf8094871c32b
+          RUN apt-get update \
+              && apt-get install -y --no-install-recommends libatomic1 \
+              && rm -rf /var/lib/apt/lists/*
+          DOCKERFILE
+
       - name: Typecheck the full Desktop renderer in Docker
         shell: bash
         run: |
@@ -46,8 +56,7 @@ jobs:
             --env CI=true --env HOME=/tmp --env HERMES_HOME=/tmp/hermes \
             --env NODE_OPTIONS=--max-old-space-size=4608 \
             --mount "type=bind,src=$RUNNER_TEMP/candidate-src,dst=/src" --workdir /src \
-            python:3.14-slim-bookworm@sha256:3fe1a0b6c2d6b2ebb572906cdabeca75aeb558c0c17db5ffefbcf8094871c32b \
-            bash -euo pipefail -s <<'BASH'
+            hermes-v0232-renderer-ci bash -euo pipefail -s <<'BASH'
           printf 'Memory limit (bytes): '; cat /sys/fs/cgroup/memory.max
           printf 'CPU quota and period: '; cat /sys/fs/cgroup/cpu.max
           python -u - <<'PYTHON'
