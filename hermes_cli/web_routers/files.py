@@ -31,6 +31,7 @@ from agent.file_safety import (
     HOME_CREDENTIAL_DIRS, HOME_CREDENTIAL_FILES, deny_key, deny_path_under, get_nt_namespace_error,
     get_write_denied_error, is_write_approval_required, resolved_home_credential_stores,
 )
+from agent.provider_media import GENERATED_SUBDIR
 from hermes_cli import web_server_file_tickets as file_tickets
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.home_data_layout import CREDENTIAL_STORE_DIRS, HOME_ENV_FILES, SECRET_CACHE_STORES
@@ -70,6 +71,8 @@ _MEDIA_CONTENT_TYPES = {
     ".webp": "image/webp", ".svg": "image/svg+xml", ".bmp": "image/bmp", ".ico": "image/x-icon",
 }
 _MEDIA_MAX_BYTES = 25 * 1024 * 1024
+_NATIVE_MEDIA_DIR = Path("cache", GENERATED_SUBDIR, "images")
+_NATIVE_MEDIA_NAME = re.compile(r"responses_image_[0-9]{8}_[0-9]{6}_[0-9a-f]{8}\.(?:png|jpe?g|webp)")
 
 _STREAMABLE_MEDIA_EXTENSIONS = frozenset({
     ".avi", ".flac", ".m4a", ".mkv", ".mov", ".mp3", ".mp4", ".ogg", ".opus", ".wav", ".webm",
@@ -529,21 +532,41 @@ def _read_base64_file(path: Path) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
+def _selected_native_media_target(path: Path, home: Path, resolved_home: Path) -> Path:
+    if path.suffix.lower() not in _MEDIA_CONTENT_TYPES:
+        raise HTTPException(status_code=415, detail="Unsupported media type")
+    relative = _NATIVE_MEDIA_DIR / path.name
+    target = resolved_home / relative
+    # A named profile is not a generic media-root override. Accept only the
+    # writer's direct child, and don't let a link relocate any part of that path.
+    if (path not in (home / relative, target) or not _NATIVE_MEDIA_NAME.fullmatch(path.name)
+            or path.resolve() != target):
+        raise HTTPException(status_code=403, detail="Path outside media roots")
+    return target
+
+
 @router.get("/api/media")
-async def get_media(path: str):
-    """Return a gateway-local image as a base64 data URL for remote clients
-    that can't read this machine's disk. Auth-gated; restricted to the image
-    allowlist, a size cap AND the resolved (symlink-safe) media roots."""
+async def get_media(path: str, profile: Optional[str] = None):
+    """Return a gateway-local image as a base64 data URL for remote clients.
+
+    The auth middleware binds private grants to their home. A shared gateway
+    request selecting another profile can reopen only its saved Responses images.
+    """
+    selected_home = _fs_profile_home(profile)
     try:
-        target = Path(path).expanduser().resolve()
-    except (OSError, RuntimeError):
+        requested = Path(path).expanduser()
+        resolved_home = selected_home.resolve() if selected_home is not None else None
+        if resolved_home is not None and resolved_home != get_hermes_home().resolve():
+            target = _selected_native_media_target(requested, selected_home, resolved_home)
+        else:
+            target = requested.resolve()
+            if target.suffix.lower() not in _MEDIA_CONTENT_TYPES:
+                raise HTTPException(status_code=415, detail="Unsupported media type")
+            if not any(target == root or root in target.parents for root in _media_serve_roots()):
+                raise HTTPException(status_code=403, detail="Path outside media roots")
+    except (OSError, RuntimeError, ValueError):
         raise HTTPException(status_code=400, detail="Invalid path")
 
-    if target.suffix.lower() not in _MEDIA_CONTENT_TYPES:
-        raise HTTPException(status_code=415, detail="Unsupported media type")
-    roots = _media_serve_roots()
-    if not any(target == root or root in target.parents for root in roots):
-        raise HTTPException(status_code=403, detail="Path outside media roots")
     if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     if target.stat().st_size > _MEDIA_MAX_BYTES:

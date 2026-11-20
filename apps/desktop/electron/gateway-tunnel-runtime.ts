@@ -111,7 +111,7 @@ export function createGatewayTunnelRuntime({
   }
 
   async function gatewayTunnelForDraft(
-    rawUrl: string,
+    rawUrl: string | undefined,
     rawOpts: GatewayTunnelDraftOptions | undefined,
     sender: Electron.WebContents
   ): Promise<GatewayTunnelSnapshot | undefined> {
@@ -218,6 +218,58 @@ export function createGatewayTunnelRuntime({
     return { ok: true, connected: true, baseUrl: canonical, connectionId }
   }
 
+  function assertDirectGatewayRoute(baseUrl: string): void {
+    // A direct flow must neither use a guarded public origin nor borrow a live forward by URL.
+    if (gatewayTunnelRequest(baseUrl)) {
+      throw new Error('Select the SSH Gateway in Connections before connecting.')
+    }
+  }
+
+  async function loginGatewayConfig<T>(
+    rawUrl: string,
+    draft: GatewayTunnelDraftOptions | undefined,
+    sender: Electron.WebContents,
+    loginDirect: (baseUrl: string) => Promise<T>
+  ) {
+    const tunnel = await gatewayTunnelForDraft(rawUrl, draft, sender)
+    if (tunnel) {
+      return signInTunnelGateway(tunnel, draft?.connectionId || '')
+    }
+
+    // This is admission, not a status probe failure that can fall back to an embedded login.
+    const baseUrl = normalizeRemoteBaseUrl(rawUrl)
+    assertDirectGatewayRoute(baseUrl)
+    return loginDirect(baseUrl)
+  }
+
+  async function testGatewayConfig<Input extends { mode?: string; remoteUrl?: string }, DirectResult, TunnelResult>(
+    payload: Input,
+    draft: GatewayTunnelDraftOptions | undefined,
+    sender: Electron.WebContents,
+    testDirectOrLegacy: (input: Input, directBaseUrl?: string) => Promise<DirectResult>,
+    testTunnel: (snapshot: GatewayTunnelSnapshot) => Promise<TunnelResult>
+  ) {
+    const tunnel = await gatewayTunnelForDraft(payload?.remoteUrl, draft, sender)
+    if (tunnel) {
+      return testTunnel(tunnel)
+    }
+    if (draft?.sshTunnel !== null) {
+      return testDirectOrLegacy(payload)
+    }
+    if (payload?.mode !== 'remote' || !payload.remoteUrl) {
+      throw new Error('Cannot test this Gateway without SSH: a Remote Gateway URL is required.')
+    }
+
+    const baseUrl = normalizeRemoteBaseUrl(payload.remoteUrl)
+    try {
+      assertDirectGatewayRoute(baseUrl)
+    } catch (cause) {
+      throw new Error('Cannot test this Gateway without SSH while the destination is protected by a saved SSH Gateway or is an SSH forward.', { cause })
+    }
+    // Do not let the legacy test resolve the same draft back to its persisted tunnel.
+    return testDirectOrLegacy(payload, baseUrl)
+  }
+
   async function sshGatewayDescriptor(source: RegistryConnection, profile: string) {
     const tunnel = await resolveGatewayTunnelSource(source)
 
@@ -273,7 +325,9 @@ export function createGatewayTunnelRuntime({
     gatewayTunnelRequest,
     resolveGatewayTunnelSource,
     gatewayTunnelForDraft,
-    signInTunnelGateway,
+    assertDirectGatewayRoute,
+    loginGatewayConfig,
+    testGatewayConfig,
     sshGatewayDescriptor
   }
 }

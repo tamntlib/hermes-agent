@@ -1053,10 +1053,7 @@ def nonretryable_client_error_result(
 
     if api_kwargs is not None:
         agent._dump_api_request_debug(api_kwargs, reason="non_retryable_client_error", error=api_error)
-    # Terminal — flush buffered context so the user sees what was tried before the abort.
     agent._flush_status_buffer()
-    # Summarize once: Cloudflare/proxy HTML pages and raw provider bodies must be
-    # collapsed here or they leak verbatim via the ``error`` field.
     from gateway.warning_notifications import TerminalFailureText  # the chat filter drops its copy
     _nonretryable_summary = agent._summarize_api_error(api_error)
     if classified.reason == FailoverReason.guardrail_blocked and (_matched := _guardrail_matched_patterns(api_error)):
@@ -1064,7 +1061,10 @@ def nonretryable_client_error_result(
         _nonretryable_summary = f"{_nonretryable_summary} (matched patterns: {_matched})"
     _plabel = provider_label_for(provider)
     _label = _NONRETRYABLE_LABELS.get(classified.reason, f"{_plabel} rejected the request and retrying won't help")
-    agent._emit_diagnostic_status(TerminalFailureText(f"❌ {_label}: {_nonretryable_summary}"))
+    # Held refusal detail is public only through the final transform, not the status rail.
+    held_refusal = classified.reason == FailoverReason.content_policy_blocked and getattr(agent, "_hold_stream", False) is True
+    status = _label if held_refusal else f"{_label}: {_nonretryable_summary}"
+    agent._emit_diagnostic_status(TerminalFailureText(f"❌ {status}"))
     # The endpoint/status trace is developer detail: verbose only (the log has it always).
     if getattr(agent, "verbose_logging", False):
         _vlines(
@@ -1350,7 +1350,7 @@ def max_retries_exhausted_result(
 def log_api_error_attempt(
     agent: Any, api_error: Exception, *, retry_count: int, max_retries: int,
     status_code: Optional[int], elapsed_time: float, api_messages: Any, approx_tokens: int,
-    retryable: bool = True,
+    reason: FailoverReason, retryable: bool = True,
 ) -> tuple[str, str, Any, Any, Any]:
     """Log one failed API attempt (warning + buffered retry trace, OpenRouter "no tool
     endpoints" hint, bare-404 missing-vendor-prefix hint); the buffer only surfaces if every
@@ -1371,8 +1371,10 @@ def log_api_error_attempt(
     _provider = getattr(agent, "provider", "unknown")
     _base = getattr(agent, "base_url", "unknown")
     _model = getattr(agent, "model", "unknown")
-    _blines(agent, f"⚠️  {_attempt[0].upper()}{_attempt[1:]} failed: {_error_summary}")
-    # Exception class, endpoint, raw body and token counts are developer detail: verbose only.
+    held_refusal = reason == FailoverReason.content_policy_blocked and getattr(agent, "_hold_stream", False) is True
+    public_summary = _NONRETRYABLE_LABELS[reason] if held_refusal else _error_summary
+    _blines(agent, f"⚠️  {_attempt[0].upper()}{_attempt[1:]} failed: {public_summary}")
+    # Exception class, endpoint, body and token counts are verbose; held refusals omit the body.
     if getattr(agent, "verbose_logging", False):
         _status_code_str = f" [HTTP {status_code}]" if status_code else ""
         _blines(
@@ -1380,7 +1382,7 @@ def log_api_error_attempt(
             f"   🔌 {error_type}{_status_code_str}  Provider: {_provider}  Model: {_model}",
             f"   🌐 Endpoint: {_base}",
         )
-        if status_code and status_code < 500:
+        if not held_refusal and status_code and status_code < 500:
             _err_body = getattr(api_error, "body", None)
             _err_body_str = str(_err_body)[:300] if _err_body else None
             if _err_body_str:

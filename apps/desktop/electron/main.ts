@@ -8822,7 +8822,10 @@ const gatewaySshTunnels = new GatewaySshTunnels({
   probe: snapshot => probeGatewayTunnel(snapshot, fetchPublicJson, value => gatewaySshTunnels.assertCurrent(value))
 })
 
-const { gatewayTunnelRequest, resolveGatewayTunnelSource, gatewayTunnelForDraft, signInTunnelGateway, sshGatewayDescriptor, requestWithOauthFallback, ensureNativeAccessToken } = createGatewayTunnelRuntime({
+const {
+  gatewayTunnelRequest, resolveGatewayTunnelSource, gatewayTunnelForDraft, assertDirectGatewayRoute, loginGatewayConfig,
+  testGatewayConfig, sshGatewayDescriptor, requestWithOauthFallback, ensureNativeAccessToken
+} = createGatewayTunnelRuntime({
   gatewaySshTunnels, tunnelDraftSources, readDesktopConnectionsRegistry, nativeAccessTokenCoordinator,
   postJsonNoAuth, openExternalUrl, descriptorMeta: () => ({ logs: hermesLog.slice(-80), ...getWindowState() }), clearReauth: () => { remoteReauthFailure = null }
 })
@@ -9804,7 +9807,7 @@ const globalRemoteSessions = createGlobalRemoteSessionRoute({
   resolvePrimary: () => ensureBackend(null, { passive: true }),
   waitReady: conn => waitForRemoteHermes(conn)
 })
-async function testDesktopConnectionConfig(input: any = {}) {
+async function testDesktopConnectionConfig(input: any = {}, directBaseUrl?: string) {
   if (input.mode === 'ssh') {
     const sshConfig = normalizeSshConfig({
       mode: 'ssh',
@@ -9908,8 +9911,12 @@ async function testDesktopConnectionConfig(input: any = {}) {
   let authMode = 'token'
   let testHeaders = {}
 
+  if (directBaseUrl && (!wantRemote || block?.url !== directBaseUrl)) {
+    throw new Error('Cannot test this Gateway without SSH: the direct URL does not match the test configuration.')
+  }
   if (wantRemote && block?.url) {
-    baseUrl = await resolveRemoteTestBaseUrl(block)
+    // An explicit disable already resolved the draft to direct. Both status and WS use this URL.
+    baseUrl = directBaseUrl ?? await resolveRemoteTestBaseUrl(block)
     authMode = normAuthMode(block.authMode)
     testHeaders = decryptRemoteHeaders(block.headers)
 
@@ -14222,19 +14229,18 @@ ipcMain.handle('hermes:ssh-config:resolve', async (_event, host) => {
     })
   })
 })
-ipcMain.handle('hermes:connection-config:test', async (event, payload, draft) => {
-  const tunnel = await gatewayTunnelForDraft(payload?.remoteUrl, draft, event.sender)
+ipcMain.handle('hermes:connection-config:test', (event, payload, draft) =>
+  testGatewayConfig(payload, draft, event.sender, testDesktopConnectionConfig, async tunnel => {
+    const status: any = await fetchConnectionStatus(tunnel.dialBaseUrl, 'oauth', null, {})
+    const ticket = await mintGatewayWsTicket(tunnel.dialBaseUrl)
+    const result = await probeGatewayWebSocket(buildGatewayWsUrlWithTicket(tunnel.dialBaseUrl, ticket), { WebSocketImpl: globalThis.WebSocket, headers: {} })
+    gatewaySshTunnels.assertCurrent(tunnel)
 
-  if (!tunnel) {return testDesktopConnectionConfig(payload)}
-  const status: any = await fetchConnectionStatus(tunnel.dialBaseUrl, 'oauth', null, {})
-  const ticket = await mintGatewayWsTicket(tunnel.dialBaseUrl)
-  const result = await probeGatewayWebSocket(buildGatewayWsUrlWithTicket(tunnel.dialBaseUrl, ticket), { WebSocketImpl: globalThis.WebSocket, headers: {} })
-  gatewaySshTunnels.assertCurrent(tunnel)
+    if (!result.ok) {throw new Error('SSH Gateway WebSocket test failed: ' + result.reason)}
 
-  if (!result.ok) {throw new Error('SSH Gateway WebSocket test failed: ' + result.reason)}
-
-  return { ok: true, reachable: true, baseUrl: tunnel.canonicalBaseUrl, version: status?.version || null }
-})
+    return { ok: true, reachable: true, baseUrl: tunnel.canonicalBaseUrl, version: status?.version || null }
+  })
+)
 
 // ── Opt-in keychain encryption for stored secrets ───────────────────────────
 // get returns the current policy without touching safeStorage; set flips it
@@ -14873,13 +14879,12 @@ ipcMain.handle('hermes:connection-config:cancel-draft', async event => {
   tunnelDraftSources.delete(event.sender.id)
   await gatewaySshTunnels.invalidate(('draft:' + event.sender.id))
 })
-ipcMain.handle('hermes:connection-config:oauth-login', async (_event, rawUrl, rawOpts) => {
-  const tunnel = await gatewayTunnelForDraft(rawUrl, rawOpts, _event.sender)
+ipcMain.handle('hermes:connection-config:oauth-login', (event, rawUrl, rawOpts) =>
+  loginGatewayConfig(rawUrl, rawOpts, event.sender, baseUrl => signInDirectGateway(baseUrl, rawOpts))
+)
 
-  if (tunnel) {return signInTunnelGateway(tunnel, rawOpts?.connectionId || '')}
-  // SSH Gateway sign-in above uses its verified native password broker.
+async function signInDirectGateway(baseUrl: string, rawOpts: any) {
   // Direct connections retain their existing native/embedded compatibility policy.
-  const baseUrl = normalizeRemoteBaseUrl(rawUrl)
   // Order login attempts without interrupting rotation of the existing session.
   const authIsCurrent: () => boolean = nativeAccessTokenCoordinator.beginLogin(baseUrl)
 
@@ -14925,6 +14930,8 @@ ipcMain.handle('hermes:connection-config:oauth-login', async (_event, rawUrl, ra
 
   const strategy = resolveLoginStrategy(statusBody, { providers })
 
+  // Status probing is best effort, but a route that became SSH-only is not a fallback.
+  assertDirectGatewayRoute(baseUrl)
   // A newer login/logout can finish during the status/provider probes. Do not
   // open a browser or login window for an attempt that no longer owns auth.
   if (!authIsCurrent()) {
@@ -14939,6 +14946,7 @@ ipcMain.handle('hermes:connection-config:oauth-login', async (_event, rawUrl, ra
         // so runNativeLogin reports the real reason instead of waiting out the
         // loopback timeout.
         openExternal: async url => {
+          assertDirectGatewayRoute(baseUrl)
           const result = await openExternalUrl(url)
 
           if (result.ok === false) {
@@ -14957,6 +14965,7 @@ ipcMain.handle('hermes:connection-config:oauth-login', async (_event, rawUrl, ra
         throw new NativeAuthChangedError()
       }
 
+      assertDirectGatewayRoute(baseUrl)
       nativeAccessTokenCoordinator.storeTokens(baseUrl, tokens)
       // Confirmed sign-in — release the reauth latch so the next
       // startHermes() re-dials instead of replaying the stale rejection.
@@ -14991,6 +15000,7 @@ ipcMain.handle('hermes:connection-config:oauth-login', async (_event, rawUrl, ra
   // Only a CONFIRMED sign-in releases the latch. A cancelled/closed login
   // window must leave it set, or the overlay's "Sign in" button starts
   // flickering again on the next retry.
+  assertDirectGatewayRoute(baseUrl)
   if (!authIsCurrent()) {
     throw new NativeAuthChangedError()
   }
@@ -15002,7 +15012,8 @@ ipcMain.handle('hermes:connection-config:oauth-login', async (_event, rawUrl, ra
   }
 
   return { ok: true, baseUrl, connected, connectionId: loginConnectionId || undefined }
-})
+}
+
 ipcMain.handle('hermes:connection-config:oauth-logout', async (_event, rawUrl) => {
   const baseUrl = normalizeRemoteBaseUrl(rawUrl)
 

@@ -105,7 +105,11 @@ def test_held_http_refusal_owns_final_transform_after_continuation(make_agent, m
     raw = response(image_item() if with_image else text_item("Primary refusal detail."), status="incomplete")
     raw.incomplete_details = NS(reason="content_filter")
     fragment, detail = "Discarded continuation text.", "Content Exists Risk: fixture provider detail"
-    calls, seen, streamed = [], [], []
+    body_detail = "fixture provider body detail"
+    calls, seen, streamed, statuses, printed = [], [], [], [], []
+    agent.status_callback = lambda kind, text: statuses.append((kind, text))
+    agent._print_fn = lambda *parts, **kw: printed.append(" ".join(map(str, parts)))
+    agent.verbose_logging = True
 
     def rewrite(**payload):
         seen.append(payload["response_text"])
@@ -124,6 +128,7 @@ def test_held_http_refusal_owns_final_transform_after_continuation(make_agent, m
         assert len(calls) == 3 and fragment in json.dumps(kwargs["messages"])
         error = RuntimeError(detail)
         error.status_code = 400
+        error.body = {"message": detail, "extra": body_detail}
         raise error
 
     monkeypatch.setattr("agent.conversation_loop.held_stream_transforms", lambda: (rewrite,))
@@ -151,5 +156,40 @@ def test_held_http_refusal_owns_final_transform_after_continuation(make_agent, m
         assert result["messages"] == stored[:-1] == history
         assert result["refused_turn_boundary_row_id"] == stored[-1]["_row_id"]
         assert stored[-1]["content"] == "Refused prompt"
+        public_output = {
+            "status": "\n".join(text for _, text in statuses),
+            "terminal": "\n".join(printed),
+        }
+        assert {sink: [marker for marker in (detail, body_detail) if marker in text]
+                for sink, text in public_output.items()} == {"status": [], "terminal": []}
     finally:
         db.close()
+
+
+def test_ordinary_http_refusal_preserves_provider_diagnostics(make_agent, monkeypatch):
+    from gateway.warning_notifications import TerminalFailureText
+
+    agent = make_agent(native=True)
+    detail = "Content Exists Risk: fixture provider detail"
+    body_detail = "fixture provider body detail"
+    statuses, printed = [], []
+    agent.status_callback = lambda kind, text: statuses.append((kind, text))
+    agent._print_fn = lambda *parts, **kw: printed.append(" ".join(map(str, parts)))
+    agent.verbose_logging = True
+
+    def send(kwargs, **callbacks):
+        error = RuntimeError(detail)
+        error.status_code = 400
+        error.body = {"message": detail, "extra": body_detail}
+        raise error
+
+    monkeypatch.setattr("agent.conversation_loop.held_stream_transforms", tuple)
+    monkeypatch.setattr(agent, "_interruptible_api_call", send)
+    monkeypatch.setattr(agent, "_interruptible_streaming_api_call", send)
+    result = agent.run_conversation("Refused prompt")
+
+    assert (result["failure_reason"], result["failure_retryable"]) == ("content_policy_blocked", False)
+    assert detail in result["final_response"] and detail in result["error"]
+    assert any(kind == "lifecycle" and isinstance(text, TerminalFailureText) and detail in text
+               for kind, text in statuses)
+    assert any(body_detail in line for line in printed)

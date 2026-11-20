@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 env:
-  CANDIDATE_TREE: ae2ca7d5da3db388258545c06f14b3fd0b883b0a
+  CANDIDATE_TREE: 8198c722b028fc555443b36f48b66733ca2d7d5d
 
 jobs:
   renderer-typecheck:
