@@ -545,13 +545,7 @@ def _selected_native_media_target(path: Path, home: Path, resolved_home: Path) -
     return target
 
 
-@router.get("/api/media")
-async def get_media(path: str, profile: Optional[str] = None):
-    """Return a gateway-local image as a base64 data URL for remote clients.
-
-    The auth middleware binds private grants to their home. A shared gateway
-    request selecting another profile can reopen only its saved Responses images.
-    """
+def _read_media_response(path: str, profile: Optional[str]) -> dict[str, str]:
     selected_home = _fs_profile_home(profile)
     try:
         requested = Path(path).expanduser()
@@ -572,8 +566,18 @@ async def get_media(path: str, profile: Optional[str] = None):
     if target.stat().st_size > _MEDIA_MAX_BYTES:
         raise HTTPException(status_code=413, detail="File too large")
 
-    encoded = await asyncio.to_thread(_read_base64_file, target)
+    encoded = _read_base64_file(target)
     return {"data_url": f"data:{_MEDIA_CONTENT_TYPES[target.suffix.lower()]};base64,{encoded}"}
+
+
+@router.get("/api/media")
+async def get_media(path: str, profile: Optional[str] = None):
+    """Serve a bounded image under the authenticated media roots.
+
+    A shared gateway request selecting another profile can reopen only its
+    saved Responses images. A private grant binds its own home in middleware.
+    """
+    return await asyncio.to_thread(_read_media_response, path, profile)
 
 
 # Remote image URLs an authenticated proxy may fetch for a client that cannot

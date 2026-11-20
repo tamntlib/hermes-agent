@@ -291,7 +291,7 @@ import { stopGatewayBeforeUpdate } from './gateway-stop-before-update'
 import { probeGatewayTunnel, resetWindowGatewayTunnel, revalidateDesktopRemoteConnections } from './gateway-tunnel-recovery'
 import { createGatewayTunnelRuntime, invalidateExternalGatewayRuntime } from './gateway-tunnel-runtime'
 import { resolveGatewayVersion } from './gateway-version'
-import { probeGatewayWebSocket } from './gateway-ws-probe'
+import { assertConnectionTestWebSocket, probeGatewayWebSocket } from './gateway-ws-probe'
 import { windowsGitCandidates } from './git-binary-candidates'
 import { registerGitIpc } from './git-ipc'
 import {
@@ -9892,6 +9892,10 @@ async function testDesktopConnectionConfig(input: any = {}, directBaseUrl?: stri
     }
   }
 
+  return testHttpDesktopConnectionConfig(input, directBaseUrl)
+}
+
+async function testHttpDesktopConnectionConfig(input: any, directBaseUrl?: string) {
   const config = coerceDesktopConnectionConfig(input, readDesktopConnectionConfig(), { persistToken: false })
   const key = connectionScopeKey(input.profile)
   // The block under test: a per-profile entry or the global remote. Coerce has
@@ -9933,30 +9937,10 @@ async function testDesktopConnectionConfig(input: any = {}, directBaseUrl?: stri
 
   const status = (await fetchConnectionStatus(baseUrl, authMode, token, testHeaders)) as any
 
-  // The HTTP status check above proves the backend is reachable, but the chat
-  // surface only works once the renderer's live WebSocket to ``/api/ws``
-  // connects — a separate transport with separate server-side guards (Host/
-  // Origin, ws-ticket/token auth). Validating only the HTTP side produced a
-  // false-positive "reachable" while the real boot still failed with "Could not
-  // connect to Hermes gateway". Mirror the renderer's connect here so the test
-  // reflects the full path the app actually uses.
   const wsUrl = await resolveTestWsUrl(baseUrl, authMode, token, {
     mintTicket: url => mintGatewayWsTicket(url, testHeaders)
   })
-
-  // Skip the WS leg only when the runtime genuinely lacks a WebSocket (so an
-  // older Electron/Node never fails the test spuriously); Electron's main
-  // process ships a global WebSocket on every supported version.
-  if (wsUrl && typeof globalThis.WebSocket === 'function') {
-    const probe = await probeGatewayWebSocket(wsUrl, { WebSocketImpl: globalThis.WebSocket, headers: testHeaders })
-
-    if (!probe.ok) {
-      throw new Error(
-        `Reached the gateway over HTTP, but the live WebSocket (/api/ws) connection failed: ${probe.reason} ` +
-          'The HTTP check can pass while the WebSocket is blocked by a proxy, firewall, or gateway auth/origin guard.'
-      )
-    }
-  }
+  await assertConnectionTestWebSocket(wsUrl, globalThis.WebSocket, testHeaders)
 
   return {
     ok: true,
@@ -14323,7 +14307,7 @@ ipcMain.handle('hermes:connections:test', async (_event, id) => {
       sshRemoteHermesPath: entry.remoteHermesPath
     })
 
-    if (result?.reachable) {
+    if ('reachable' in result && result.reachable) {
       sshInventoryAttemptedAt.delete(entry.id)
       sshRosterCache.delete(entry.id)
       await probeSshProfileInventory(entry)

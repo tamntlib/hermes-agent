@@ -321,6 +321,25 @@ function spawnedBackendProbeOptions(isChildAlive: () => boolean) {
   }
 }
 
+// A successful HTTP check does not prove that the separate WS upgrade works.
+// Keep the compatibility skip for a runtime that has no WebSocket constructor.
+export async function assertConnectionTestWebSocket(
+  wsUrl: string | null | undefined,
+  WebSocketImpl: typeof globalThis.WebSocket,
+  headers: Record<string, string>
+): Promise<void> {
+  if (!wsUrl || typeof WebSocketImpl !== 'function') {
+    return
+  }
+  const probe = await probeGatewayWebSocket(wsUrl, { WebSocketImpl, headers })
+  if (!probe.ok) {
+    throw new Error(
+      `Reached the gateway over HTTP, but the live WebSocket (/api/ws) connection failed: ${probe.reason} ` +
+        'The HTTP check can pass while the WebSocket is blocked by a proxy, firewall, or gateway auth/origin guard.'
+    )
+  }
+}
+
 export {
   DEFAULT_CONNECT_TIMEOUT_MS,
   DEFAULT_PROGRESS_CHECK_INTERVAL_MS,
