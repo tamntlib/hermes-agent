@@ -230,7 +230,7 @@ import {
   resolveDesktopConnectionRequest,
   resolveDesktopWindowLaunch
 } from './desktop-profile'
-import { registryPrimaryBootRoute, resolveDesktopRemoteRoute, v1SshTerminalPoolKey } from './desktop-remote-route'
+import { resolveDesktopRemoteDialRoute, resolveDesktopRemoteRoute, v1SshTerminalPoolKey } from './desktop-remote-route'
 import { type DesktopSharedMetrics, registerDesktopSharedMetrics } from './desktop-shared-metrics'
 import { type DesktopSshBudgets, readDesktopSshBudgets } from './desktop-ssh-budgets'
 import {
@@ -8809,6 +8809,7 @@ const tunnelDraftSources = new Map<number, RegistryConnection>()
 
 const gatewaySshTunnels = new GatewaySshTunnels({
   controlDir: defaultControlDir(),
+  sshBudgets: desktopSshBudgets,
   createTransport: (config, options) => new SshConnection(config, { ...options, sshBinary: desktopSshBinary(), rememberLog: sshRememberLog }),
   pickPort: () => pickLocalPort() as Promise<number>,
   isSourceCurrent: (id, fingerprint) => {
@@ -9663,21 +9664,18 @@ async function resolveRemoteBackend(
 
   const config = readDesktopConnectionConfig()
   const registry = readDesktopConnectionsRegistry()
-  const primarySource = registry.connections.find(connection => connection.id === registry.primary)
-
-  if (primarySource?.sshTunnelError) {throw new Error(primarySource.sshTunnelError)}
-
-  const route = options.forceRegistryPrimary
-    ? registryPrimaryBootRoute(registry)
-    : resolveDesktopRemoteRoute({
-        config,
-        env: {
-          token: process.env.HERMES_DESKTOP_REMOTE_TOKEN,
-          url: process.env.HERMES_DESKTOP_REMOTE_URL
-        },
-        profile,
-        registry
-      })
+  const route = resolveDesktopRemoteDialRoute(
+    {
+      config,
+      env: {
+        token: process.env.HERMES_DESKTOP_REMOTE_TOKEN,
+        url: process.env.HERMES_DESKTOP_REMOTE_URL
+      },
+      profile,
+      registry
+    },
+    options.forceRegistryPrimary
+  )
 
   if (!route) {
     return null
@@ -9704,13 +9702,6 @@ async function resolveRemoteBackend(
       }
     )
   } else {
-    if (route.kind === 'remote' && route.source !== 'registry') {
-      const uniqueId = resolvedConnectionId(registry, { mode: 'remote', remoteKind: 'url', baseUrl: route.url, authMode: route.authMode, token: route.token, headers: route.headers ?? {} })
-
-      if (!uniqueId && registry.connections.some(connection => connection.kind === 'remote' && (connection.sshTunnel || connection.sshTunnelError))) {throw new Error('Select the SSH Gateway in Connections before connecting.')}
-      route.connectionId = uniqueId || undefined
-    }
-
     const token =
       route.authMode === 'oauth' ? null : route.source === 'env' ? route.token : decryptDesktopSecret(route.token)
 

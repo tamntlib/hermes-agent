@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 
 import { test, vi } from 'vitest'
 
@@ -7,9 +8,12 @@ import {
   mergeConnectionInput,
   normalizeConnectionInput,
   normalizeRegistry,
-  reconcileAppliedGlobalConnection
+  reconcileAppliedGlobalConnection,
+  type SshTunnelConfig
 } from './connection-registry'
+import { readDesktopSshBudgets } from './desktop-ssh-budgets'
 import { GatewaySshTunnels } from './gateway-ssh-tunnel'
+import { SshConnection } from './ssh-connection'
 
 const config = { host: 'alice@box:2222', keyPath: '/tmp/my key', remotePort: 9119 }
 
@@ -19,6 +23,38 @@ const registry = normalizeRegistry({
 })
 
 const original = registry.connections.find(c => c.id === 'a')!
+
+test.each([
+  { yaml: 'desktop:\n  ssh_connect_timeout: 45\n  ssh_forward_timeout: 60', connect: 45, forward: 60 },
+  { yaml: '', connect: 15, forward: 15 }
+])('Remote Gateway SSH applies connect=$connect s and forward=$forward s', async ({ yaml, connect, forward }) => {
+  let transport!: SshConnection
+  const spawnFn = vi.fn((_command: string, _args: string[]) => {
+    const child = new EventEmitter()
+    queueMicrotask(() => child.emit('close', 0, null))
+
+    return child
+  })
+  const deps = {
+    controlDir: '/tmp/hermes-tests',
+    pickPort: async () => 45000,
+    sshBudgets: readDesktopSshBudgets(yaml, { log: vi.fn(), warn: vi.fn() }),
+    createTransport: (ssh: SshTunnelConfig, options: object) => {
+      transport = new SshConnection(ssh, { ...options, mux: true, spawnFn })
+
+      return transport
+    }
+  }
+  const tunnels = new GatewaySshTunnels(deps)
+
+  try {
+    await tunnels.ensure(normalizeConnectionInput({ ...original, sshTunnel: config }, registry))
+    assert.ok(spawnFn.mock.calls[0][1].includes(`ConnectTimeout=${connect}`))
+    assert.equal(transport._forwardTimeoutMs, forward * 1000)
+  } finally {
+    await tunnels.closeAll()
+  }
+})
 
 test('SSH tunnel survives cold load, rename and global reconciliation; disabling is explicit', () => {
   const saved = normalizeConnectionInput({ ...original, sshTunnel: config }, registry)

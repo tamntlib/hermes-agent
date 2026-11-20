@@ -1025,7 +1025,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                     from hermes_state_rewind import retain_refused_turn_for_display
                     retain_refused_turn_for_display(
                         _adb, getattr(state.agent, "session_id", session_id),
-                        notice=CONTENT_REFUSED_NOTICE,
+                        notice=result.get("refused_turn_display_notice") or CONTENT_REFUSED_NOTICE,
                         boundary_row_id=result.get("refused_turn_boundary_row_id"))
 
             # Head rotated (compression split): emit provenance so clients can render the boundary.

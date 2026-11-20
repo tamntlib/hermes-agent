@@ -676,7 +676,7 @@ export function ChatSidebar({
     [matchesScope, isPinnedSession, filtersNarrow, sessionMatchesFilters]
   )
 
-  const { searchPending, serverMatches } = useServerSessionSearch(trimmedQuery, searchScope)
+  const { searchPending, serverMatches } = useServerSessionSearch(trimmedQuery, searchScope, displayScope)
 
   const searchResults = useMemo(
     () =>

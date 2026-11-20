@@ -787,6 +787,14 @@ def handle_content_policy_refusal(
         getattr(response, "stop_reason", None) or "n/a", str(_stop_details or "n/a")[:500],
         _refusal_log or "(no text)",
     )
+    has_completed_images = agent.api_mode == "codex_responses" and bool(
+        getattr(_refusal_result, "responses_image_outputs", None)
+    )
+    if has_completed_images:
+        # Refusals bypass normal intake. Keep completed artifacts locally, not the
+        # normalized message, so either the fallback or the terminal reply can settle them.
+        from agent.responses_images import materialize_response_images
+        materialize_response_images(agent, _refusal_result)
     if agent._has_pending_fallback():
         agent._buffer_diagnostic_status("⚠️ Model declined to respond (safety refusal) — trying fallback...")
     # Name the cause: without a reason the switch notice reads "unavailable (provider failure)",
@@ -826,8 +834,11 @@ def handle_content_policy_refusal(
     from agent.turn_context import history_before_current_turn, refused_turn_boundary_row_id
     clean_history = history_before_current_turn(messages, current_turn_user_idx, conversation_history)
     _boundary_row_id = refused_turn_boundary_row_id(messages, current_turn_user_idx)
-    return RefusalVerdict("return", _content_policy_blocked_result(
+    result = _content_policy_blocked_result(
         clean_history, api_call_count, final_response=_refusal_response,
         error_detail=_refusal_text or "model declined (content_filter)",
         boundary_row_id=_boundary_row_id,
-    ), active_system_prompt)
+    )
+    if has_completed_images:
+        result["_refused_response_has_images"] = True
+    return RefusalVerdict("return", result, active_system_prompt)

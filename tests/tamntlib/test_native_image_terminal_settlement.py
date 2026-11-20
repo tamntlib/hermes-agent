@@ -408,3 +408,129 @@ def test_additional_terminal_direct_returns_keep_native_final(terminal_turn, kin
         assert run.result["failure_reason"] == "interpreter_shutdown"
     else:
         assert run.result["failure_reason"] == "context_overflow" and run.result["compaction_disabled"]
+
+
+@pytest.mark.parametrize("owner,blocked", [
+    ("desktop", False), ("gateway", False), ("managed", False), ("desktop", True),
+])
+def test_refusal_response_retains_completed_sibling_for_display_only(make_agent, monkeypatch, tmp_path, owner, blocked):
+    import asyncio
+    import base64
+    import json
+    from threading import RLock
+    from types import SimpleNamespace as NS
+
+    from agent.managed_worker import accept_result, result_frame
+    from agent.turn_failure_copy import CONTENT_REFUSED_DISPLAY_KIND, CONTENT_REFUSED_NOTICE
+    from gateway.config import GatewayConfig, Platform
+    from gateway.platforms.event import MessageEvent
+    from gateway.run import GatewayRunner
+    from gateway.session import AsyncSessionStore, SessionSource, SessionStore
+    from gateway.session_managed_worker import _finalize_managed_refusal
+    from tests.tamntlib.responses_test_support import text_item
+    from tui_gateway import server
+
+    store = SessionStore(tmp_path / "sessions", GatewayConfig())
+    source = SessionSource(platform=Platform.LOCAL, chat_id="image-refusal", user_id="offline")
+    entry = store.get_or_create_session(source)
+    sid = entry.session_id
+    db = store._db_for_session_id(sid)
+    db_path = db.db_path
+    agent = make_agent(native=True)
+    agent.session_id = sid
+    agent._session_db = db
+    db.append_message(sid, "user", "Accepted prompt")
+    db.append_message(sid, "assistant", "Accepted answer")
+    history = db.get_messages_as_conversation(sid, include_row_ids=True)
+    baseline = deepcopy(history)
+    question = "Refused prompt"
+    image = image_item()
+    raw = response(image, deepcopy(image), image_item("unfinished", status="in_progress"),
+                   text_item("Fixture refusal detail."), status="incomplete")
+    raw.incomplete_details = NS(reason="content_filter")
+    calls, seen = [], []
+
+    def send(kwargs, **callbacks):
+        calls.append(deepcopy(kwargs))
+        if len(calls) == 1:
+            return raw
+        assert len(calls) == 2 and "A different prompt" in json.dumps(kwargs["input"]), "Unexpected recovery call"
+        return response(text_item("Next answer."), response_id="resp_next")
+
+    def transform(**kwargs):
+        seen.append(kwargs["response_text"])
+        return "REVIEWED REFUSAL" if blocked else None
+
+    def hook(name, **kwargs):
+        return [transform(**kwargs)] if name == "transform_llm_output" else []
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", send)
+    monkeypatch.setattr(agent, "_interruptible_streaming_api_call", send)
+    monkeypatch.setattr("hermes_cli.lifecycle.invoke_hook", hook)
+    monkeypatch.setattr("agent.conversation_loop.held_stream_transforms", lambda: (transform,) if blocked else ())
+    try:
+        result = agent.run_conversation(question, conversation_history=history)
+        assert len(calls) == 1
+        assert result["failed"] and not result["completed"] and not result["failure_retryable"]
+        assert result["failure_reason"] == "content_policy_blocked"
+        assert result["messages"] == baseline
+        if owner == "desktop":
+            session = {"history_lock": RLock(), "agent": agent}
+            st = server._TurnRun(agent, None, None, False, result=result, history=baseline, prompt_text=question)
+            payload, _, status = server._complete_turn_payload(session, st, None, 80)
+            assert status == "error" and payload["text"] == result["final_response"]
+        else:
+            runner = object.__new__(GatewayRunner)
+            runner.session_store = store
+            runner._async_session_store = AsyncSessionStore(store)
+            runner._session_db = db
+            runner._evict_cached_agent = lambda *a: None
+
+            async def refresh(*args):
+                pass
+
+            runner._refresh_agent_cache_message_count = refresh
+            if owner == "managed":
+                accepted, _ = accept_result(json.loads(json.dumps(result_frame(result))))
+                asyncio.run(_finalize_managed_refusal(NS(runner=runner), sid, accepted))
+            else:
+                asyncio.run(runner._hmwa_persist_turn_transcript(
+                    event=MessageEvent(text=question, source=source), source=source,
+                    session_entry=entry, session_key=entry.session_key, agent_result=result,
+                    agent_messages=result["messages"], prepared=runner._PreparedTurn(
+                        history, "", question, None, None, None, sid, "offline"),
+                    response=result["final_response"], agent_failed_early=True,
+                    hidden_reasoning_incomplete=False, is_context_overflow_failure=False,
+                ))
+    finally:
+        db.close()
+
+    reopened = SessionDB(db_path)
+    try:
+        active = reopened.get_messages_as_conversation(sid, include_row_ids=True)
+        assert active == baseline
+        display = reopened.get_messages_as_conversation(sid, include_compacted=True)
+        refused, = [row for row in display if row.get("display_kind") == CONTENT_REFUSED_DISPLAY_KIND]
+        assert refused["content"] == question
+        notice = refused["display_metadata"]["content_refused"]["notice"]
+        paths = media_paths(notice)
+        if blocked:
+            assert result["final_response"] == "REVIEWED REFUSAL"
+            assert not paths and result["pre_transform_response"] is None
+        else:
+            assert len(paths) == 1, "Completed sibling missing from owner-retained refusal on reopen"
+            assert paths == media_paths(result["final_response"])
+        assert notice.splitlines()[0] == CONTENT_REFUSED_NOTICE
+        assert "Fixture refusal detail." not in notice
+        assert len(seen) == 1 and len(media_paths(seen[0])) == 1, "Transform must see one completed sibling"
+        assert media_paths(seen[0])[0].read_bytes() == base64.b64decode(image.result)
+        assert image.result not in json.dumps([result, display, seen])
+
+        agent._session_db = reopened
+        next_result = agent.run_conversation("A different prompt", conversation_history=active)
+        assert next_result["completed"]
+        next_input = json.dumps(calls[-1]["input"])
+        assert "Accepted prompt" in next_input
+        assert all(value not in next_input for value in (question, "Fixture refusal detail.", "MEDIA:", image.result))
+    finally:
+        reopened.close()

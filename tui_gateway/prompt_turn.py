@@ -943,7 +943,8 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
         from hermes_state_rewind import retain_refused_turn_for_display
         retain_refused_turn_for_display(
             getattr(agent, "_session_db", None), getattr(agent, "session_id", None),
-            notice=CONTENT_REFUSED_NOTICE, boundary_row_id=result.get("refused_turn_boundary_row_id"))
+            notice=result.get("refused_turn_display_notice") or CONTENT_REFUSED_NOTICE,
+            boundary_row_id=result.get("refused_turn_boundary_row_id"))
     # The receipt verifies the stored row's body, which keeps the model's text as written;
     # only the delivered copy drops a silence marker.
     receipt = _persisted_turn_receipt(st, raw, status)

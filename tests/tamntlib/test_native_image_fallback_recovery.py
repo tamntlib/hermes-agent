@@ -16,7 +16,8 @@ from tests.tamntlib.responses_test_support import response
 pytest_plugins = ("tests.tamntlib.responses_test_support",)
 
 
-def test_native_image_fallback_length_final_is_transformed_before_flush(make_agent, monkeypatch, tmp_path):
+@pytest.mark.parametrize("refused_response", [False, True], ids=["transport-error", "same-reply-refusal"])
+def test_native_image_fallback_length_final_is_transformed_before_flush(make_agent, monkeypatch, tmp_path, refused_response):
     url = "https://fallback.invalid/v1"
     (tmp_path / "config.yaml").write_text(json.dumps({"providers": {"fallback": {
         "base_url": url, "api_mode": "chat_completions", "api_key": "offline-fixture"}}}))
@@ -50,12 +51,16 @@ def test_native_image_fallback_length_final_is_transformed_before_flush(make_age
     first = response(image_item(), NS(type="function_call", id="fc", call_id="call", name="terminal",
                                       status="completed", arguments="{}"))
 
+    refusal = response(image_item(), status="incomplete", response_id="refused")
+    refusal.incomplete_details = NS(reason="content_filter")
+    native_calls = 1 if refused_response else 2
+
     def send(kwargs, **callbacks):
         calls.append((agent.api_mode, kwargs))
-        assert len(calls) <= 6
+        assert len(calls) <= native_calls + 4
         if len(calls) == 1:
-            return first
-        if len(calls) == 2:
+            return refusal if refused_response else first
+        if not refused_response and len(calls) == 2:
             error = RuntimeError("402 synthetic insufficient credits")
             error.status_code = 402
             raise error
@@ -67,8 +72,10 @@ def test_native_image_fallback_length_final_is_transformed_before_flush(make_age
     monkeypatch.setattr(agent, "_interruptible_streaming_api_call", send)
     try:
         result = agent.run_conversation("Produce an image and explain it.")
-        assert len(calls) == 6
-        assert [mode for mode, _ in calls] == ["codex_responses"] * 2 + ["chat_completions"] * 4
+        assert len(calls) == native_calls + 4
+        assert [mode for mode, _ in calls] == ["codex_responses"] * native_calls + ["chat_completions"] * 4
+        if refused_response:
+            assert "MEDIA:" not in json.dumps(calls[native_calls][1]["messages"])
         assert len(seen) == 1
         assert len(media_paths(seen[0])) == 1 and media_paths(seen[0])[0].is_file()
         assert result["final_response"] == "Reviewed fallback partial."

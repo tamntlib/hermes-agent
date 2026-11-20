@@ -1,12 +1,13 @@
 import {
   connectionScopeKey,
   modeIsRemoteLike,
+  normalizeRemoteBaseUrl,
   normalizeSshConfig,
   normAuthMode,
   profileRemoteOverride,
   profileSshOverride
 } from './connection-config'
-import type { ConnectionRegistry } from './connection-registry'
+import { resolvedConnectionId, type ConnectionRegistry } from './connection-registry'
 import { matchingConnectionId, type StoredRoute } from './connection-route-identity'
 
 type RouteSource = 'env' | 'profile' | 'registry' | 'settings'
@@ -238,4 +239,61 @@ export function registryPrimaryBootRoute(registry: ConnectionRegistry): DesktopR
   }
 
   return resolveRegistryPrimaryRoute(registry)
+}
+
+function remoteOrigin(url: string | undefined): string | null {
+  try {
+    return new URL(normalizeRemoteBaseUrl(url)).origin
+  } catch {
+    return null
+  }
+}
+
+export function resolveDesktopRemoteDialRoute(
+  input: DesktopRemoteRouteInput,
+  forceRegistryPrimary = false
+): DesktopRemoteRoute | null {
+  const { registry } = input
+  const route = forceRegistryPrimary ? registryPrimaryBootRoute(registry) : resolveDesktopRemoteRoute(input)
+
+  // A malformed registry primary may not have a URL and therefore resolve to
+  // null. Block that fallback without shadowing an unrelated explicit route.
+  if (!route || route.source === 'registry') {
+    const primarySource = registry.connections.find(connection => connection.id === registry.primary)
+
+    if (primarySource?.sshTunnelError) {
+      throw new Error(primarySource.sshTunnelError)
+    }
+  }
+
+  if (route?.kind === 'remote' && route.source !== 'registry') {
+    const uniqueId = resolvedConnectionId(registry, {
+      mode: 'remote',
+      remoteKind: 'url',
+      baseUrl: route.url,
+      authMode: route.authMode,
+      token: route.token,
+      headers: route.headers ?? {}
+    })
+
+    if (uniqueId) {
+      route.connectionId = uniqueId
+    } else {
+      const origin = remoteOrigin(route.url)
+      const tunnelAtDestination =
+        origin &&
+        registry.connections.some(
+          connection =>
+            connection.kind === 'remote' &&
+            (connection.sshTunnel || connection.sshTunnelError) &&
+            remoteOrigin(connection.url) === origin
+        )
+
+      if (tunnelAtDestination) {
+        throw new Error('Select the SSH Gateway in Connections before connecting.')
+      }
+    }
+  }
+
+  return route
 }

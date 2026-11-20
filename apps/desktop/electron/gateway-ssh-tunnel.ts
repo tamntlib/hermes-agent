@@ -3,6 +3,7 @@ import http from 'node:http'
 
 import { normalizeRemoteBaseUrl } from './connection-config'
 import { normalizeSshTunnel, type RegistryConnection, type SshTunnelConfig } from './connection-registry'
+import type { DesktopSshBudgets } from './desktop-ssh-budgets'
 import { NativeAuthChangedError } from './native-access-token'
 
 export interface GatewayTunnelTransport {
@@ -68,10 +69,11 @@ export class GatewaySshTunnels {
     private readonly deps: {
       createTransport: (
         config: SshTunnelConfig,
-        options: { scope: string; ownershipId: string; controlDir: string }
+        options: DesktopSshBudgets & { scope: string; ownershipId: string; controlDir: string }
       ) => GatewayTunnelTransport
       pickPort: () => Promise<number>
       controlDir: string
+      sshBudgets?: DesktopSshBudgets
       isSourceCurrent?: (connectionId: string, fingerprint: string) => boolean
       probe?: (snapshot: GatewayTunnelSnapshot) => Promise<void>
     }
@@ -163,6 +165,7 @@ export class GatewaySshTunnels {
     }
 
     const transport = this.deps.createTransport(snapshot.ssh, {
+      ...this.deps.sshBudgets,
       scope: `gateway:${source.id}:${generation}`,
       ownershipId: generation,
       controlDir: this.deps.controlDir

@@ -587,6 +587,7 @@ def settle_held_final(agent, result: Any) -> None:
     did not see first, and a failed transform yields the withheld notice."""
     if not isinstance(result, dict):
         return
+    refused_response_has_images = result.pop("_refused_response_has_images", False)
     text, turn_id = result.get("final_response"), getattr(agent, "_current_turn_id", "") or ""
     recorded = getattr(agent, "_llm_output_transform", None)
     if not isinstance(text, str) or not text:
@@ -605,6 +606,10 @@ def settle_held_final(agent, result: Any) -> None:
         if getattr(agent, "_hold_stream", False) is True and result.get("error") == text:
             result["error"] = final
         result.update(final_response=final, response_transformed=transformed, pre_transform_response=pre_transform)
+        if refused and refused_response_has_images:
+            from agent.responses_images import refused_image_display_notice
+            if notice := refused_image_display_notice(agent, final):
+                result["refused_turn_display_notice"] = notice
         if not refused:
             agent._persist_session(messages, None)
         return

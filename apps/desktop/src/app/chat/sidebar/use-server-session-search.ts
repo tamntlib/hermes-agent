@@ -26,16 +26,23 @@ interface ScopedSearchState extends ServerSessionSearch {
  * an unscoped request searches the primary backend's launch profile, whatever
  * profile is on screen. "All profiles" asks the primary as before.
  */
-export function useServerSessionSearch(query: string, profileScope: string): ServerSessionSearch {
+export function useServerSessionSearch(
+  query: string,
+  requestScope: string,
+  displayScope: string = requestScope
+): ServerSessionSearch {
   const [search, setSearch] = useState<ScopedSearchState>({ key: '', serverMatches: [], searchPending: false })
   const { connectionId } = useStore($apiRequestScope)
   const connection = useStore($connection)
-  const profile = profileScope === ALL_PROFILES ? null : normalizeProfileKey(profileScope)
+  const profile = requestScope === ALL_PROFILES ? null : normalizeProfileKey(requestScope)
+  // Bot Mode can address a backend profile through a logical request alias.
+  const resultProfile = profile === null ? undefined : normalizeProfileKey(displayScope)
 
   // Track both request authority and the displayed source across a gateway re-home.
   const key = JSON.stringify([
     query,
-    backendScopeKey(connectionId, profileScope),
+    backendScopeKey(connectionId, requestScope),
+    resultProfile,
     connection?.connectionId ?? null,
     connection?.mode ?? null
   ])
@@ -60,7 +67,7 @@ export function useServerSessionSearch(query: string, profileScope: string): Ser
               serverMatches: res.results.map(result => ({
                 ...result,
                 connection_id: requestConnectionId,
-                profile: profile ?? undefined
+                profile: resultProfile
               }))
             })
           }
@@ -76,7 +83,7 @@ export function useServerSessionSearch(query: string, profileScope: string): Ser
       cancelled = true
       window.clearTimeout(id)
     }
-  }, [query, profile, key])
+  }, [query, profile, resultProfile, key])
 
   // Effects run after render: never paint the previous scope's hits for even one frame.
   return search.key === key ? search : { searchPending: Boolean(query), serverMatches: [] }

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setApiRequestConnection } from '@/api/client'
 import { group, split } from '@/components/pane-shell/tree/model'
 import { $layoutTree, noteActiveTreeGroup } from '@/components/pane-shell/tree/store'
+import { $workspaceMode, $workspaceNewSessionTarget } from '@/components/pane-shell/workspace-scope'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { registry } from '@/contrib/registry'
 import type { HermesConnection } from '@/global'
@@ -502,6 +503,60 @@ describe('ChatSidebar connection-scoped presentation', () => {
       cleanup()
       setApiRequestConnection(null)
       $activeGatewayProfile.set('default')
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('renders unloaded Bot Mode hits when the fetch alias differs from the sidebar profile', async () => {
+    const route = { connectionId: 'vps', mode: 'remote' as const, profile: 'moxie', targetProfile: 'default' }
+    const firstHit = {
+      session_id: 'unloaded-bot-session',
+      title: 'First bot hit',
+      model: null,
+      role: null,
+      session_started: 1,
+      snippet: 'needle',
+      source: 'cli'
+    }
+    const secondHit = { ...firstHit, session_id: 'another-bot-session', title: 'Second bot hit' }
+    const search = vi.fn().mockResolvedValueOnce({ results: [firstHit] }).mockResolvedValueOnce({ results: [secondHit] })
+    const initialWorkspaceMode = $workspaceMode.get()
+    const initialTarget = $workspaceNewSessionTarget.get()
+    vi.useFakeTimers()
+    vi.stubGlobal('hermesDesktop', {
+      api: (request: { path: string }) =>
+        request.path.startsWith('/api/sessions/search') ? search(request) : Promise.resolve({ profiles: [] })
+    })
+    setApiRequestConnection('vps')
+    $connection.set({ ...localConnection, connectionId: 'vps', mode: 'remote' })
+    $sessions.set([remote, { ...remote, id: 'loaded-work-session', profile: 'work' }])
+    $workspaceMode.set('bots')
+    $workspaceNewSessionTarget.set({ kind: 'route', route })
+
+    try {
+      renderSidebar('/', 'chat')
+      fireEvent.change(screen.getByRole('textbox'), { target: { value: 'needle' } })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200)
+      })
+      const request = { connectionId: 'vps', profile: 'moxie', path: '/api/sessions/search?q=needle&profile=moxie' }
+      expect(search).toHaveBeenNthCalledWith(1, expect.objectContaining(request))
+      expect(screen.queryAllByText('First bot hit').length).toBeGreaterThan(0)
+
+      act(() => $workspaceNewSessionTarget.set({ kind: 'route', route: { ...route, targetProfile: 'work' } }))
+      expect(screen.queryByText('First bot hit')).toBeNull()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200)
+      })
+      expect(search).toHaveBeenNthCalledWith(2, expect.objectContaining(request))
+      expect(screen.queryAllByText('Second bot hit').length).toBeGreaterThan(0)
+      expect(screen.queryByText('First bot hit')).toBeNull()
+    } finally {
+      cleanup()
+      $workspaceNewSessionTarget.set(initialTarget)
+      $workspaceMode.set(initialWorkspaceMode)
+      setApiRequestConnection(null)
       vi.useRealTimers()
       vi.unstubAllGlobals()
     }

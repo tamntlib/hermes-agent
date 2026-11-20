@@ -67,6 +67,19 @@ def append_pending_response_images(agent: Any, message: Any) -> None:
     _append_output_lines(message, _artifact_lines(pending))
 
 
+def refused_image_display_notice(agent: Any, final: str) -> str | None:
+    """Retain only local artifact lines the final transform allowed, never provider text."""
+    from agent.turn_failure_copy import CONTENT_REFUSED_NOTICE
+
+    pending = [item for item in agent._responses_image_artifacts.values() if not item.get("delivered")]
+    allowed = set(_artifact_lines(pending))
+    notice = CONTENT_REFUSED_NOTICE
+    for line in dict.fromkeys(final.splitlines()):
+        if line in allowed and len(notice) + 1 + len(line) <= 4096:  # managed-worker scalar limit
+            notice += "\n" + line
+    return notice if notice != CONTENT_REFUSED_NOTICE else None
+
+
 def preserve_recovery_response_images(
     agent: Any, messages: Any, final_response: str, finish_reason: str,
 ) -> tuple[str, bool, Any]:

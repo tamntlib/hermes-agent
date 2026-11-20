@@ -391,8 +391,8 @@ class CLIChatTurnMixin:
                 from hermes_state_rewind import retain_refused_turn_for_display
                 retain_refused_turn_for_display(
                     getattr(self.agent, "_session_db", None), getattr(self.agent, "session_id", None),
-                    notice=CONTENT_REFUSED_NOTICE,
-                    boundary_row_id=(turn.result or {}).get("refused_turn_boundary_row_id"))
+                    notice=turn.result.get("refused_turn_display_notice") or CONTENT_REFUSED_NOTICE,
+                    boundary_row_id=turn.result.get("refused_turn_boundary_row_id"))
             # A reused thread must never hold stale references to a disposed CLI instance.
             try:
                 set_sudo_password_callback(None)
