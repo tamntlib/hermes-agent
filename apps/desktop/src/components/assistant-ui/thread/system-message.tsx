@@ -1,6 +1,9 @@
 import { MessagePrimitive, useAuiState } from '@assistant-ui/react'
-import { type FC, useState } from 'react'
+import { useStore } from '@nanostores/react'
+import { type FC, useEffect, useState } from 'react'
 
+import { $apiRequestScope, hermesApi } from '@/api/client'
+import { useComposerScope } from '@/app/chat/composer/scope'
 import { MarkdownTextContent } from '@/components/assistant-ui/markdown-text'
 import { messageContentText } from '@/components/assistant-ui/thread/content'
 import { MessageTimelineTimestamp } from '@/components/assistant-ui/thread/timeline-timestamp'
@@ -10,7 +13,9 @@ import { Codicon } from '@/components/ui/codicon'
 import { LogView } from '@/components/ui/log-view'
 import { ToolIcon } from '@/components/ui/tool-icon'
 import { useI18n } from '@/i18n'
+import { mediaTagValues } from '@/lib/chat-messages/parts'
 import { LinkifiedText } from '@/lib/external-link'
+import { mediaName } from '@/lib/media'
 import { cn } from '@/lib/utils'
 
 const SLASH_STATUS_RE = /^slash:(?<command>\/[^\n]+)\n(?<output>[\s\S]*)$/
@@ -65,26 +70,127 @@ export const BackgroundResult: FC<BackgroundResultProps> = ({ text, report, proc
   )
 }
 
+// The refusal wire shape carries only native Responses cache entries, not general attachments.
+const RESPONSES_IMAGE_PATH = /\/cache\/generated\/images\/responses_image_\d{8}_\d{6}_[0-9a-f]{8}\.(?:png|jpe?g|webp)$/
+const RASTER_DATA_URL = /^data:image\/(?:png|jpeg|webp);base64,/
+// eslint-disable-next-line no-control-regex -- control characters are not valid artifact references
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/
+
+function splitRefusedNotice(notice: string) {
+  const [firstLine, ...lines] = notice.split('\n')
+  const text = [firstLine]
+  const paths = new Set<string>()
+  for (const line of lines) {
+    if (!line.startsWith('MEDIA:')) {
+      text.push(line)
+      continue
+    }
+    const marker = line.endsWith('\r') ? line.slice(0, -1) : line
+    const path = marker.slice('MEDIA:'.length)
+    const normalized = path.replace(/\\/g, '/')
+    if (
+      /^(?:\/(?![\\/])|[a-z]:[\\/])/i.test(path) &&
+      !/(?:^|\/)\.{1,2}(?:\/|$)/.test(normalized) &&
+      !CONTROL_CHARS.test(path) &&
+      RESPONSES_IMAGE_PATH.test(normalized) &&
+      mediaTagValues(marker)[0] === path
+    ) {
+      paths.add(path)
+    }
+  }
+  return { text: text.join('\n'), paths }
+}
+
+interface RefusedImageProps {
+  path: string
+  connectionId: string | null
+  profile: string | null
+}
+
+async function readRefusedImage({ path, connectionId, profile }: RefusedImageProps): Promise<string | null> {
+  // Unlike the general attachment resolver, this endpoint enforces resolved media roots
+  // and a size cap. Do not fall back to the desktop filesystem or a URL from the notice.
+  const response = await hermesApi<{ data_url?: unknown }>({
+    path: `/api/media?path=${encodeURIComponent(path)}`,
+    ...(connectionId ? { connectionId } : {}),
+    ...(profile ? { profile } : {})
+  })
+  const src = response?.data_url
+  return typeof src === 'string' && RASTER_DATA_URL.test(src) ? src : null
+}
+
+function RefusedImage({ path, connectionId, profile }: RefusedImageProps) {
+  const { t } = useI18n()
+  const [src, setSrc] = useState<null | string>('')
+  useEffect(() => {
+    let cancelled = false
+    const settle = (value: string | null) => {
+      if (!cancelled) {
+        setSrc(value)
+      }
+    }
+    void readRefusedImage({ path, connectionId, profile }).then(settle, () => settle(null))
+    return () => {
+      cancelled = true
+    }
+  }, [path, connectionId, profile])
+
+  if (src === null) {
+    return <span className="text-xs text-muted-foreground">{t.desktop.imagePreviewFailed}</span>
+  }
+  return src ? (
+    <img
+      alt={mediaName(path)}
+      className="block h-auto w-auto max-h-(--image-preview-height) max-w-full rounded-lg object-contain"
+      onError={() => setSrc(null)}
+      src={src}
+    />
+  ) : null
+}
+
+function RefusedImages({ paths }: { paths: Set<string> }) {
+  const scope = useComposerScope()
+  const ambient = useStore($apiRequestScope)
+  if (scope.target !== 'main' && (!scope.connectionId || !scope.profile)) {
+    return null
+  }
+  const connectionId = scope.connectionId ?? ambient.connectionId
+  const profile = scope.profile ?? ambient.profile
+
+  return [...paths].map(path => (
+    <RefusedImage
+      connectionId={connectionId}
+      key={JSON.stringify([connectionId, profile, path])}
+      path={path}
+      profile={profile}
+    />
+  ))
+}
+
 /** A safety-refused turn kept for display: the user's own message rendered
  *  greyed and non-interactive (no edit, no actions), with a short notice that
  *  the model's safety filter refused it. Right-aligned like the prompt it was,
  *  but a dashed muted card — never the blue user bubble, never a reply. */
-const ContentRefusedNote: FC<{ notice: string; userText: string }> = ({ notice, userText }) => (
-  <MessagePrimitive.Root
-    className="flex w-full min-w-0 max-w-full flex-col items-stretch gap-1 self-end pb-(--conversation-turn-gap)"
-    data-role="system"
-    data-slot="aui_content-refused"
-  >
-    <div className="ml-auto flex min-w-0 max-w-full flex-col gap-1.5 rounded-xl border border-dashed border-(--ui-stroke-tertiary) px-3 py-2 text-left opacity-70">
-      {userText && <UserMessageText className="wrap-anywhere text-(--ui-text-tertiary)" text={userText} />}
-      <span className="flex items-center gap-1.5 text-[0.6875rem] leading-5 text-muted-foreground/70">
-        <Codicon className="shrink-0 text-muted-foreground/60" name="shield" size="0.75rem" />
-        <span className="wrap-anywhere">{notice}</span>
-      </span>
-    </div>
-    <MessageTimelineTimestamp className="self-end pr-1.5" />
-  </MessagePrimitive.Root>
-)
+const ContentRefusedNote: FC<{ notice: string; userText: string }> = ({ notice, userText }) => {
+  const { text, paths } = splitRefusedNotice(notice)
+  return (
+    <MessagePrimitive.Root
+      className="flex w-full min-w-0 max-w-full flex-col items-stretch gap-1 self-end pb-(--conversation-turn-gap)"
+      data-role="system"
+      data-slot="aui_content-refused"
+    >
+      <div className="ml-auto flex min-w-0 max-w-full flex-col gap-1.5 rounded-xl border border-dashed border-(--ui-stroke-tertiary) px-3 py-2 text-left opacity-70">
+        {userText && <UserMessageText className="wrap-anywhere text-(--ui-text-tertiary)" text={userText} />}
+        <span className="flex items-center gap-1.5 text-[0.6875rem] leading-5 text-muted-foreground/70">
+          <Codicon className="shrink-0 text-muted-foreground/60" name="shield" size="0.75rem" />
+          <span className="wrap-anywhere">{text}</span>
+        </span>
+        {paths.size > 0 && <RefusedImages paths={paths} />}
+      </div>
+      <MessageTimelineTimestamp className="self-end pr-1.5" />
+    </MessagePrimitive.Root>
+  )
+}
 
 export const SystemMessage: FC = () => {
   const { t } = useI18n()

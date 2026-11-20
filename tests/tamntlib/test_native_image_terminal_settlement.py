@@ -235,6 +235,7 @@ def test_policy_refusal_does_not_reintroduce_the_dropped_turn(terminal_turn, hel
     assert all(row.get("content") != run.result["final_response"] for row in run.stored)
     assert len(run.seen) == 1 and "MEDIA:" in run.seen[0]
     assert media_paths(run.result["final_response"])
+    assert "refused_turn_display_notice" not in run.result  # ordinary partial, not a refused sibling
 
 
 def test_held_compression_replacement_retains_error_mirror(terminal_turn):
@@ -410,10 +411,12 @@ def test_additional_terminal_direct_returns_keep_native_final(terminal_turn, kin
         assert run.result["failure_reason"] == "context_overflow" and run.result["compaction_disabled"]
 
 
-@pytest.mark.parametrize("owner,blocked", [
-    ("desktop", False), ("gateway", False), ("managed", False), ("desktop", True),
+@pytest.mark.parametrize("owner,blocked,denial", [
+    ("desktop", False, None), ("gateway", False, None), ("managed", False, None), ("desktop", True, None),
+    ("desktop", False, "http"), ("gateway", False, "text"), ("managed", False, "http"),
+    ("desktop", True, "http"),
 ])
-def test_refusal_response_retains_completed_sibling_for_display_only(make_agent, monkeypatch, tmp_path, owner, blocked):
+def test_refusal_response_retains_completed_sibling_for_display_only(make_agent, monkeypatch, tmp_path, owner, blocked, denial):
     import asyncio
     import base64
     import json
@@ -422,6 +425,7 @@ def test_refusal_response_retains_completed_sibling_for_display_only(make_agent,
 
     from agent.managed_worker import accept_result, result_frame
     from agent.turn_failure_copy import CONTENT_REFUSED_DISPLAY_KIND, CONTENT_REFUSED_NOTICE
+    from agent.turn_finalizer import settle_held_final
     from gateway.config import GatewayConfig, Platform
     from gateway.platforms.event import MessageEvent
     from gateway.run import GatewayRunner
@@ -448,13 +452,35 @@ def test_refusal_response_retains_completed_sibling_for_display_only(make_agent,
     raw = response(image, deepcopy(image), image_item("unfinished", status="in_progress"),
                    text_item("Fixture refusal detail."), status="incomplete")
     raw.incomplete_details = NS(reason="content_filter")
-    calls, seen = [], []
+    calls, modes, seen = [], [], []
+    if denial:
+        url = "https://fallback.invalid/v1"
+        (tmp_path / "config.yaml").write_text(json.dumps({"providers": {"fallback": {
+            "base_url": url, "api_mode": "chat_completions", "api_key": "offline-fixture"}}}))
+        agent._fallback_chain = [{"provider": "custom:fallback", "model": "private-model",
+                                  "base_url": url, "api_mode": "chat_completions", "api_key": "offline-fixture"}]
+        monkeypatch.setattr("agent.auxiliary_client._create_openai_client",
+                            lambda **kw: NS(base_url=url, api_key="offline-fixture", _custom_headers={}))
 
     def send(kwargs, **callbacks):
+        modes.append(agent.api_mode)
         calls.append(deepcopy(kwargs))
         if len(calls) == 1:
             return raw
-        assert len(calls) == 2 and "A different prompt" in json.dumps(kwargs["input"]), "Unexpected recovery call"
+        if denial and len(calls) == 2:
+            fallback_input = json.dumps(kwargs["messages"])
+            assert all(value not in fallback_input for value in ("Fixture refusal detail.", "MEDIA:", image.result))
+            if denial == "http":
+                raise ProviderFailure(400, "Content Exists Risk: fallback refusal detail.")
+            return NS(id="denied", choices=[NS(message=NS(content="Fallback refusal detail.", tool_calls=[]),
+                                                finish_reason="content_filter")],
+                      usage=NS(prompt_tokens=17, completion_tokens=3, total_tokens=20))
+        assert len(calls) == (3 if denial else 2), "Unexpected recovery call"
+        if agent.api_mode == "chat_completions":
+            assert "A different prompt" in json.dumps(kwargs["messages"])
+            return NS(id="next", choices=[NS(message=NS(content="Next answer.", tool_calls=[]), finish_reason="stop")],
+                      usage=NS(prompt_tokens=17, completion_tokens=3, total_tokens=20))
+        assert "A different prompt" in json.dumps(kwargs["input"])
         return response(text_item("Next answer."), response_id="resp_next")
 
     def transform(**kwargs):
@@ -470,10 +496,13 @@ def test_refusal_response_retains_completed_sibling_for_display_only(make_agent,
     monkeypatch.setattr("agent.conversation_loop.held_stream_transforms", lambda: (transform,) if blocked else ())
     try:
         result = agent.run_conversation(question, conversation_history=history)
-        assert len(calls) == 1
+        assert modes == ["codex_responses"] + (["chat_completions"] if denial else [])
         assert result["failed"] and not result["completed"] and not result["failure_retryable"]
         assert result["failure_reason"] == "content_policy_blocked"
         assert result["messages"] == baseline
+        settled = deepcopy(result)
+        settle_held_final(agent, result)
+        assert result == settled and len(seen) == 1
         if owner == "desktop":
             session = {"history_lock": RLock(), "agent": agent}
             st = server._TurnRun(agent, None, None, False, result=result, history=baseline, prompt_text=question)
@@ -521,7 +550,7 @@ def test_refusal_response_retains_completed_sibling_for_display_only(make_agent,
             assert len(paths) == 1, "Completed sibling missing from owner-retained refusal on reopen"
             assert paths == media_paths(result["final_response"])
         assert notice.splitlines()[0] == CONTENT_REFUSED_NOTICE
-        assert "Fixture refusal detail." not in notice
+        assert all(detail not in notice for detail in ("Fixture refusal detail.", "refusal detail."))
         assert len(seen) == 1 and len(media_paths(seen[0])) == 1, "Transform must see one completed sibling"
         assert media_paths(seen[0])[0].read_bytes() == base64.b64decode(image.result)
         assert image.result not in json.dumps([result, display, seen])
@@ -529,8 +558,8 @@ def test_refusal_response_retains_completed_sibling_for_display_only(make_agent,
         agent._session_db = reopened
         next_result = agent.run_conversation("A different prompt", conversation_history=active)
         assert next_result["completed"]
-        next_input = json.dumps(calls[-1]["input"])
+        next_input = json.dumps(calls[-1]["input" if modes[-1] == "codex_responses" else "messages"])
         assert "Accepted prompt" in next_input
-        assert all(value not in next_input for value in (question, "Fixture refusal detail.", "MEDIA:", image.result))
+        assert all(value not in next_input for value in (question, "refusal detail.", "MEDIA:", image.result))
     finally:
         reopened.close()

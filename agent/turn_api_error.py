@@ -359,7 +359,11 @@ def settle_unrecovered_error(
                 retry_count = compression_attempts = 0
                 return _verdict("break")
         # Terminal from here: collapse the continuation trail once, before the persist.
-        _delivered = settle_delivered_partial(agent, messages, current_turn_user_idx)
+        # A refusal discards this turn's fragments. Don't spend its transform on them.
+        _delivered = (
+            "" if classified.reason == FailoverReason.content_policy_blocked
+            else settle_delivered_partial(agent, messages, current_turn_user_idx)
+        )
         return _verdict("return", nonretryable_client_error_result(
             agent, api_error, classified, status_code=status_code, api_kwargs=api_kwargs,
             api_messages=api_messages, messages=messages, conversation_history=conversation_history,

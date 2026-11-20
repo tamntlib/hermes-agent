@@ -57,6 +57,26 @@ test('an unrelated SSH Gateway does not erase the app-global primary for duplica
   assert.equal(route.connectionId, direct.id)
 })
 
+test('a unique direct registry row does not acquire app-global settings identity unless it is primary', () => {
+  const direct = { id: 'direct', kind: 'remote', label: 'Direct', authMode: 'oauth', url: env.url }
+  const config = { mode: 'remote', remote: direct }
+  const registry = normalizeRegistry({ primary: tunnel.id, connections: [direct, tunnel] })
+  const route = resolveDesktopRemoteDialRoute({ config, registry })
+  assert.equal(route?.source, 'settings')
+  assert.equal(route.connectionId, undefined)
+
+  const withDirectPrimary = normalizeRegistry({ primary: direct.id, connections: [direct, tunnel] })
+  assert.equal(resolveDesktopRemoteDialRoute({ config, registry: withDirectPrimary })?.connectionId, direct.id)
+})
+
+test('a direct environment route does not acquire an unrelated settings identity', () => {
+  const direct = { id: 'direct', kind: 'remote', label: 'Direct', authMode: 'token', ...env }
+  const registry = normalizeRegistry({ primary: direct.id, connections: [direct, tunnel] })
+  const route = resolveDesktopRemoteDialRoute({ config: { mode: 'local' }, env, registry })
+  assert.equal(route?.source, 'env')
+  assert.equal(route.connectionId, undefined)
+})
+
 test('an exact SSH Gateway match preserves its identity rather than dialing the public URL', () => {
   const registry = normalizeRegistry({ connections: [tunnel] })
   const route = resolveDesktopRemoteDialRoute({

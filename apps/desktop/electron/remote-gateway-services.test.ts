@@ -133,3 +133,83 @@ test('draft probe reuses identical owner but target changes remain temporary and
   assert.equal(owner.forUrl(active.dialBaseUrl), active)
   await owner.closeAll()
 })
+
+test.each(['direct', 'tunnel', 'malformed'] as const)(
+  'an unqualified draft does not select a saved SSH Gateway by registry order (%s sibling)',
+  async sibling => {
+    const other = {
+      ...source,
+      id: 'b',
+      label: 'B',
+      url: 'https://IDENTITY.invalid:443/',
+      sshTunnel: sibling === 'direct' ? undefined : { host: sibling === 'malformed' ? '' : 'other' }
+    }
+    let registry = normalizeRegistry({ connections: [other, source] })
+    const draftSources = new Map()
+    const createTransport = vi.fn(() => ({
+      open: async () => {},
+      forward: async () => {},
+      close: async () => {},
+      isAlive: async () => true
+    }))
+    let port = 45200
+    const owner = new GatewaySshTunnels({ controlDir: '/tmp/test', createTransport, pickPort: async () => ++port })
+    const runtime = createGatewayTunnelRuntime({
+      gatewaySshTunnels: owner,
+      tunnelDraftSources: draftSources,
+      readDesktopConnectionsRegistry: () => registry,
+      nativeAccessTokenCoordinator: createNativeAccessTokenCoordinator({
+        loadTokens: () => null,
+        clearTokens: () => {},
+        storeTokens: () => {},
+        normalizeBaseUrl: value => value,
+        isRefreshAuthRejection: () => false,
+        tokenNeedsRefresh: () => false,
+        refreshTokens: vi.fn()
+      }),
+      postJsonNoAuth: vi.fn(),
+      openExternalUrl: vi.fn(),
+      clearReauth: () => {},
+      descriptorMeta: () => ({})
+    })
+    const sender = { id: 7, once: vi.fn() } as never
+
+    try {
+      for (const connections of [[other, source], [source, other]]) {
+        registry = normalizeRegistry({ connections })
+        await assert.rejects(runtime.gatewayTunnelForDraft(source.url, undefined, sender), /Select the SSH Gateway/)
+        assert.equal(createTransport.mock.calls.length, 0)
+        assert.equal(draftSources.size, 0)
+      }
+
+      const selected = await runtime.gatewayTunnelForDraft(source.url, { connectionId: source.id }, sender)
+      assert.equal(selected?.connectionId, source.id)
+      assert.equal(selected.ssh.host, source.sshTunnel.host)
+      assert.equal(await runtime.gatewayTunnelForDraft('https://unrelated.invalid', undefined, sender), undefined)
+      assert.equal(await runtime.gatewayTunnelForDraft(source.url, { connectionId: source.id, sshTunnel: null }, sender), undefined)
+      const draft = await runtime.gatewayTunnelForDraft(source.url, { sshTunnel: source.sshTunnel }, sender)
+      assert.equal(draft?.connectionId, 'draft:7')
+      assert.equal(owner.forUrl(selected.dialBaseUrl), selected)
+
+      registry = normalizeRegistry({ connections: [source] })
+      assert.equal(await runtime.gatewayTunnelForDraft(source.url, undefined, sender), selected)
+      await assert.rejects(
+        runtime.gatewayTunnelForDraft(source.url, { connectionId: 'retired', label: 'Draft' }, sender),
+        /selected connection no longer exists/
+      )
+
+      if (sibling === 'malformed') {
+        registry = normalizeRegistry({ connections: [other] })
+        await assert.rejects(runtime.gatewayTunnelForDraft(source.url, undefined, sender), /Invalid SSH tunnel/)
+        const repair = await runtime.gatewayTunnelForDraft(
+          source.url,
+          { connectionId: other.id, sshTunnel: source.sshTunnel },
+          sender
+        )
+        assert.equal(repair?.connectionId, 'draft:7')
+      }
+    } finally {
+      await owner.closeAll()
+    }
+  }
+)

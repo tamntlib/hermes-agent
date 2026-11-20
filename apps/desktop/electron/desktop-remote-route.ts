@@ -7,7 +7,7 @@ import {
   profileRemoteOverride,
   profileSshOverride
 } from './connection-config'
-import { resolvedConnectionId, type ConnectionRegistry } from './connection-registry'
+import { type ConnectionRegistry, resolvedConnectionId } from './connection-registry'
 import { matchingConnectionId, type StoredRoute } from './connection-route-identity'
 
 type RouteSource = 'env' | 'profile' | 'registry' | 'settings'
@@ -277,7 +277,10 @@ export function resolveDesktopRemoteDialRoute(
     })
 
     if (uniqueId) {
-      route.connectionId = uniqueId
+      const match = registry.connections.find(connection => connection.id === uniqueId)
+      if (match?.sshTunnel || match?.sshTunnelError) {
+        route.connectionId = uniqueId
+      }
     } else {
       const origin = remoteOrigin(route.url)
       const tunnelAtDestination =

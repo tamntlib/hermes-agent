@@ -24,7 +24,7 @@ def _append_output_lines(message: Any, output_lines: list[str]) -> None:
         }]
 
 
-def materialize_response_images(agent: Any, message: Any) -> None:
+def materialize_response_images(agent: Any, message: Any, *, refused: bool = False) -> None:
     """Consume the transient image carrier before hooks or durable message construction."""
     outputs = getattr(message, "responses_image_outputs", None)
     if not outputs:
@@ -45,6 +45,8 @@ def materialize_response_images(agent: Any, message: Any) -> None:
                 artifacts[key]["error"] = str(exc)
             except OSError:
                 artifacts[key]["error"] = "Could not write generated image."
+        if refused:
+            artifacts[key]["from_refused_response"] = True
         if artifacts[key] not in local:
             local.append(artifacts[key])
     message.provider_data["responses_image_outputs"] = local
@@ -71,7 +73,10 @@ def refused_image_display_notice(agent: Any, final: str) -> str | None:
     """Retain only local artifact lines the final transform allowed, never provider text."""
     from agent.turn_failure_copy import CONTENT_REFUSED_NOTICE
 
-    pending = [item for item in agent._responses_image_artifacts.values() if not item.get("delivered")]
+    pending = [
+        item for item in agent._responses_image_artifacts.values()
+        if item.get("from_refused_response") and not item.get("delivered")
+    ]
     allowed = set(_artifact_lines(pending))
     notice = CONTENT_REFUSED_NOTICE
     for line in dict.fromkeys(final.splitlines()):

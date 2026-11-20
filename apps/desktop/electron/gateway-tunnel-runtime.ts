@@ -1,10 +1,10 @@
 import { hostLabelFromBaseUrl, normalizeRemoteBaseUrl } from './connection-config'
 import { type ConnectionRegistry, normalizeSshTunnel, type RegistryConnection } from './connection-registry'
+import type { ConnectionsChange } from './gateway-connections-store'
 import { type GatewaySshTunnels, gatewayTunnelFingerprint, type GatewayTunnelSnapshot } from './gateway-ssh-tunnel'
 import { type createNativeAccessTokenCoordinator, NativeAuthChangedError } from './native-access-token'
 import type { NativeAccessTokenOptions } from './native-access-token'
 import { runNativeLogin } from './native-oauth-login'
-import type { ConnectionsChange } from './gateway-connections-store'
 import { requestWithOauthFallback as requestWithDirectOauthFallback } from './oauth-rest-request'
 
 /** Fence stale descriptors synchronously, including edits from the machine-wide Webapp store. */
@@ -22,6 +22,34 @@ export async function invalidateExternalGatewayRuntime(
   }
 
   await Promise.all(retiring)
+}
+
+interface GatewayTunnelDraftOptions {
+  connectionId?: string | null
+  label?: string
+  kind?: RegistryConnection['kind']
+  authMode?: RegistryConnection['authMode']
+  sshTunnel?: unknown
+}
+
+function storedTunnelAtDraftDestination(registry: ConnectionRegistry, canonical: string): RegistryConnection | undefined {
+  const matches = registry.connections.filter(connection => {
+    if (connection.kind !== 'remote') {
+      return false
+    }
+
+    try {
+      return normalizeRemoteBaseUrl(connection.url) === canonical
+    } catch {
+      return false
+    }
+  })
+  const tunnel = matches.find(connection => connection.sshTunnel || connection.sshTunnelError)
+  if (tunnel && matches.length !== 1) {
+    throw new Error('Select the SSH Gateway in Connections before connecting.')
+  }
+
+  return tunnel
 }
 
 export function createGatewayTunnelRuntime({
@@ -84,7 +112,7 @@ export function createGatewayTunnelRuntime({
 
   async function gatewayTunnelForDraft(
     rawUrl: string,
-    rawOpts: any,
+    rawOpts: GatewayTunnelDraftOptions | undefined,
     sender: Electron.WebContents
   ): Promise<GatewayTunnelSnapshot | undefined> {
     if (!rawUrl) {
@@ -93,19 +121,26 @@ export function createGatewayTunnelRuntime({
 
     const registry = readDesktopConnectionsRegistry()
     const canonical = normalizeRemoteBaseUrl(rawUrl)
+    const connectionId = rawOpts?.connectionId
+    const provided = rawOpts?.sshTunnel !== undefined && Object.prototype.hasOwnProperty.call(rawOpts, 'sshTunnel')
+    let existing = connectionId ? registry.connections.find(connection => connection.id === connectionId) : undefined
 
-    const existing = rawOpts?.connectionId
-      ? registry.connections.find(connection => connection.id === rawOpts.connectionId)
-      : registry.connections.find(connection => connection.kind === 'remote' && connection.url === canonical)
+    if (!existing) {
+      if (connectionId && !rawOpts?.label) {
+        throw new Error('The selected connection no longer exists.')
+      }
 
-    if (rawOpts?.connectionId && !existing && !rawOpts?.label) {
-      throw new Error('The selected connection no longer exists.')
+      if (!provided) {
+        existing = storedTunnelAtDraftDestination(registry, canonical)
+        if (connectionId && existing) {
+          throw new Error('The selected connection no longer exists.')
+        }
+      }
     }
 
-    const provided = rawOpts && Object.prototype.hasOwnProperty.call(rawOpts, 'sshTunnel')
-    const rawTunnel = provided ? rawOpts.sshTunnel : existing?.sshTunnel
+    const rawTunnel = provided ? rawOpts?.sshTunnel : existing?.sshTunnel
 
-    if (!rawTunnel) {
+    if (rawTunnel == null) {
       if (existing?.sshTunnelError && !provided) {
         throw new Error(existing.sshTunnelError)
       }
@@ -121,7 +156,7 @@ export function createGatewayTunnelRuntime({
       id: existing?.id || 'draft:' + sender.id,
       kind: 'remote',
       label: existing?.label || 'Draft',
-      url: canonical,
+      url: !connectionId && existing?.url ? existing.url : canonical,
       authMode: rawOpts?.authMode || existing?.authMode || 'oauth',
       headers: existing?.headers,
       sshTunnel: normalizeSshTunnel(rawTunnel, canonical)

@@ -587,26 +587,28 @@ def settle_held_final(agent, result: Any) -> None:
     did not see first, and a failed transform yields the withheld notice."""
     if not isinstance(result, dict):
         return
-    refused_response_has_images = result.pop("_refused_response_has_images", False)
     text, turn_id = result.get("final_response"), getattr(agent, "_current_turn_id", "") or ""
     recorded = getattr(agent, "_llm_output_transform", None)
     if not isinstance(text, str) or not text:
         return
+    refused = result.get("failure_reason") == "content_policy_blocked"
+    held = getattr(agent, "_hold_stream", False) is True
+    # The refusal's error detail is also public, even when it doesn't mirror the reply yet.
+    mirror_error = held and (refused or result.get("error") == text)
     pending = any(not item.get("delivered") for item in (getattr(agent, "_responses_image_artifacts", None) or {}).values())
     if pending:
         from agent.responses_images import preserve_recovery_response_images
 
-        refused = result.get("failure_reason") == "content_policy_blocked"
         # The owner drops a deterministic policy refusal's turn. Settle delivery on a
         # disposable transcript, never append that final to the clean replay history.
         messages = [] if refused else result["messages"]
         final, transformed, pre_transform = preserve_recovery_response_images(
             agent, messages, text, "interrupted" if result.get("interrupted") else "error",
         )
-        if getattr(agent, "_hold_stream", False) is True and result.get("error") == text:
+        if mirror_error:
             result["error"] = final
         result.update(final_response=final, response_transformed=transformed, pre_transform_response=pre_transform)
-        if refused and refused_response_has_images:
+        if refused:
             from agent.responses_images import refused_image_display_notice
             if notice := refused_image_display_notice(agent, final):
                 result["refused_turn_display_notice"] = notice
@@ -614,11 +616,13 @@ def settle_held_final(agent, result: Any) -> None:
             agent._persist_session(messages, None)
         return
     if isinstance(recorded, tuple) and recorded[:1] == (turn_id,):
+        if mirror_error:
+            result["error"] = text
         return
-    if getattr(agent, "_hold_stream", False) is not True:
+    if not held:
         return
     final, transformed, _ = apply_llm_output_transform(agent, text, turn_id=turn_id)
-    if result.get("error") == text:  # keep the mirror an error card reads
+    if mirror_error:
         result["error"] = final
     result.update(final_response=final, response_transformed=transformed, pre_transform_response=None)
 
