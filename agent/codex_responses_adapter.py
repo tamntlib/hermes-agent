@@ -1296,6 +1296,8 @@ class _OutputScan:
     def __init__(self, response_status: Optional[str]) -> None:
         self.content_parts, self.reasoning_parts, self.tool_calls = [], [], []
         self.reasoning_items_raw, self.message_items_raw = [], []
+        self.image_outputs = []
+        self.response_status = response_status
         self.has_incomplete_items = response_status in _INCOMPLETE_STATUSES
         self.saw_streaming_or_item_incomplete = response_status in {"queued", "in_progress"}
         self.saw_commentary_phase = self.saw_final_answer_phase = self.saw_reasoning_item = False
@@ -1329,6 +1331,14 @@ class _OutputScan:
                 call = _response_tool_call(item, item_type, len(self.tool_calls))
                 call._codex_output_index = output_index
                 self.tool_calls.append(call)
+            elif (item_type == "image_generation_call" and item_status == "completed"
+                  and self.response_status not in {"queued", "in_progress"}):
+                self.image_outputs.append({
+                    "item_id": getattr(item, "id", None), "status": item_status,
+                    "output_index": output_index,
+                    "result": getattr(item, "result", None),
+                    "output_format": getattr(item, "output_format", None),
+                })
 
     def _message(self, item: Any, item_status: Optional[str], output_index: int) -> None:
         normalized_phase = _lower_or_none(getattr(item, "phase", None))
@@ -1349,6 +1359,17 @@ class _OutputScan:
         )
         raw["_codex_output_index"] = output_index
         self.message_items_raw.append(raw)
+
+
+def _image_response_identity(response: Any) -> str:
+    """Keep replay idempotent without retaining payloads or recyclable object addresses."""
+    if provider_id := getattr(response, "id", None):
+        return provider_id
+    identity = getattr(response, "_hermes_image_response_identity", None)
+    if identity is None:
+        identity = "hermes-image-response:" + uuid.uuid4().hex
+        response._hermes_image_response_identity = identity
+    return identity
 
 
 def _untrusted_completed_issuers() -> frozenset:
@@ -1430,11 +1451,16 @@ def _normalize_codex_response(
         codex_reasoning_items=scan.reasoning_items_raw or None,
         # Leaked text must not be replayed as a completed assistant message on the continuation.
         codex_message_items=None if leaked_tool_call_text else (scan.message_items_raw or None),
+        responses_image_outputs=[
+            {"response_id": getattr(response, "id", None),
+             "response_identity": _image_response_identity(response), **item}
+            for item in scan.image_outputs
+        ] or None,
     )
     # Reasoning-only: for Codex/xAI (and endpoints declaring ``responses_trusts_completed_status=False``),
     # status=completed means "still thinking" → incomplete so the continuation retries. Other backends trust
     # response.status — forcing incomplete there stalls for minutes on a final state.
-    reasoning_only = (scan.reasoning_items_raw or reasoning_parts or scan.saw_reasoning_item) and not final_text
+    reasoning_only = (scan.reasoning_items_raw or reasoning_parts or scan.saw_reasoning_item) and not final_text and not scan.image_outputs
     trusted_final = (
         response_status == "completed" and issuer_kind not in _untrusted_completed_issuers()
     )
@@ -1445,7 +1471,8 @@ def _normalize_codex_response(
     elif (
         leaked_tool_call_text
         or scan.saw_streaming_or_item_incomplete
-        or ((scan.has_incomplete_items or scan.saw_commentary_phase) and not scan.saw_final_answer_phase)
+        or (scan.has_incomplete_items and not scan.saw_final_answer_phase)
+        or (scan.saw_commentary_phase and not scan.saw_final_answer_phase and not scan.image_outputs)
         or (reasoning_only and not trusted_final)
     ):
         finish_reason = "incomplete"
