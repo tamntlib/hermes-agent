@@ -103,6 +103,8 @@ def recorded(monkeypatch):
 
 def _parent(session_id="root"):
     return types.SimpleNamespace(session_id=session_id, model="parent-model", provider="openrouter",
+                                 base_url="https://openrouter.ai/api/v1", api_key="offline-synthetic",
+                                 api_mode="chat_completions", service_tier=None,
                                  tool_progress_callback=None, _delegate_spinner=None, request_overrides={},
                                  _safe_print=lambda line: None)
 
