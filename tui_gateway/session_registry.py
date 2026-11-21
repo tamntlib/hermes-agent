@@ -95,6 +95,14 @@ def _release_build_profile_scopes(scopes) -> None:
         _release_profile_runtime_scope_tokens(scopes)
 
 
+def _pin_restored_service_tier(session: dict | None, overrides: dict | None):
+    """Rebuilds use the same pin as a later /fast pick; /new clears it."""
+    tier = (overrides or {}).get("service_tier_override")
+    if session is not None and tier is not None:
+        session.setdefault("create_service_tier_override", tier)
+    return session
+
+
 def _deferred_build_agent_kwargs(current: dict, session_db) -> dict:
     """_make_agent kwargs for a deferred (first-prompt) build. A lazy-resumed (watch) session carries the
     stored conversation id so the upgrade continues it; a cold deferred resume restores the full persisted
@@ -110,9 +118,11 @@ def _deferred_build_agent_kwargs(current: dict, session_db) -> dict:
     else:
         if override := current.get("model_override"):
             kw["model_override"] = override
-        kw.update({k: v for k, v in (("reasoning_config_override", current.get("create_reasoning_override")),
-                                     ("service_tier_override", current.get("create_service_tier_override")))
-                   if v is not None})
+        if (reasoning := current.get("create_reasoning_override")) is not None:
+            kw["reasoning_config_override"] = reasoning
+    # A pick made after resume wins over the stored snapshot, including explicit Normal.
+    if (tier := current.get("create_service_tier_override")) is not None:
+        kw["service_tier_override"] = tier
     return kw
 
 

@@ -79,8 +79,8 @@ def resumed_normal_session(tmp_path, monkeypatch):
         ctx = server._Resume(1, {}, sid)
         ctx.found = row
         rec = ctx.record('desktop', str(tmp_path), [], overrides)
-        assert 'create_service_tier_override' not in rec
         expected_override = '' if expected_tier == 'normal' else expected_tier
+        assert rec['create_service_tier_override'] == expected_override
         assert rec['resume_runtime_overrides']['service_tier_override'] == expected_override
         kwargs = server._deferred_build_agent_kwargs(rec, db)
         assert kwargs['service_tier_override'] == expected_override

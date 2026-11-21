@@ -280,9 +280,7 @@ def _set_fast(rid, params, key, value, session):
         _write_config_key("agent.service_tier", nv)
     if agent is not None:
         agent.service_tier = {"fast": "priority", "normal": None}.get(nv, nv)
-        current_overrides = {k: v for k, v in (getattr(agent, "request_overrides", {}) or {}).items()
-                             if k not in ("service_tier", "speed")}
-        agent.request_overrides = {**current_overrides, **(overrides or {})}
+        _apply_session_service_tier(agent, agent.service_tier, explicit=True)
         _persist_live_session_runtime(session)
         _emit_session_info(params.get("session_id", ""), session)
     return _kv(rid, key, nv)

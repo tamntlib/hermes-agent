@@ -258,16 +258,17 @@ def _persist_live_session_runtime(session: dict | None) -> None:
                 model_config["composer_override_profile"] = composer_profile
             elif "composer_override_profile" in session:
                 model_config.pop("composer_override_profile", None)
-            tier_override = session.get("create_service_tier_override")
-            if tier_override is None and not model_config.get("service_tier"):
-                # Resume records keep explicit normal here, not in the create pin.
-                # Only restore the empty override: a newer nonempty live tier wins.
-                resume_overrides = session.get("resume_runtime_overrides") or {}
-                if resume_overrides.get("service_tier_override") == "":
-                    tier_override = ""
-            if tier_override is not None:
-                # agent.service_tier is None for explicit normal; without this the distinction is erased on every persist.
-                model_config["service_tier"] = tier_override or "normal"
+            if not model_config.get("service_tier"):
+                tier_override = session.get("create_service_tier_override")
+                if tier_override is None:
+                    # Resume records may carry explicit normal here before a create pin is set.
+                    # Only restore the empty override when the live agent has no non-empty tier.
+                    resume_overrides = session.get("resume_runtime_overrides") or {}
+                    if resume_overrides.get("service_tier_override") == "":
+                        tier_override = ""
+                if tier_override is not None:
+                    # agent.service_tier is None for explicit normal; without this the distinction is erased on every persist.
+                    model_config["service_tier"] = tier_override or "normal"
             model = str(model_config.get("model") or "").strip()
             persistence.sessions.replace_session_config(session_key, ReplaceSessionConfig(model_config, model or None))
     except Exception:
@@ -664,6 +665,40 @@ def _startup_system_prompt(cfg: dict, task_id: str) -> str:
     return system_prompt
 
 
+def _service_tier_request_overrides(tier, model, provider, base_url, overrides) -> dict:
+    """Project one selection on one route without borrowing another route's extras."""
+    from agent.fast_mode import STATIC_TIERS
+    from hermes_cli.models import resolve_fast_mode_overrides
+    from tools.delegate_tool_tuning import without_service_tier
+
+    cleaned = without_service_tier(overrides)
+    if tier in STATIC_TIERS:
+        cleaned.update(resolve_fast_mode_overrides(model, provider=provider, base_url=base_url, tier=tier) or {})
+    return cleaned
+
+
+def _apply_session_service_tier(agent, tier: str | None, *, explicit: bool = False) -> None:
+    """Apply the session pick to the live route and its primary restoration snapshot."""
+    from agent.fast_mode import BOUNDED_MODES, STATIC_TIERS
+
+    if not explicit and tier not in STATIC_TIERS | BOUNDED_MODES:
+        return
+    # Initialization can merge provider extra_body back in: clean only after it finishes.
+    base_url = getattr(agent, "base_url", None)
+    if getattr(agent, "api_mode", None) == "anthropic_messages":
+        base_url = getattr(agent, "_anthropic_base_url", None) or base_url
+    agent.request_overrides = _service_tier_request_overrides(
+        tier, getattr(agent, "model", None), getattr(agent, "provider", None), base_url,
+        getattr(agent, "request_overrides", None))
+    if (primary := getattr(agent, "_primary_runtime", None)) is not None:
+        # A live edit may target a fallback: retain the primary's own extras and admission.
+        base_url = primary.get("base_url")
+        if primary.get("api_mode") == "anthropic_messages":
+            base_url = primary.get("anthropic_base_url") or base_url
+        primary["request_overrides"] = _service_tier_request_overrides(
+            tier, primary.get("model"), primary.get("provider"), base_url, primary.get("request_overrides"))
+
+
 def _make_agent(
     sid: str, key: str, session_id: str | None = None, session_db=None,
     model_override: dict | str | None = None, provider_override: str | None = None,
@@ -694,6 +729,7 @@ def _make_agent(
     ignore_rules = is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
     with _sessions_lock:
         session = _sessions.get(sid)
+    tier = service_tier_override if service_tier_override is not None else _load_service_tier()
     agent = AIAgent(
         model=model, max_iterations=_cfg_max_turns(cfg), provider=runtime.get("provider"),
         requested_provider=runtime.get("requested_provider"),
@@ -703,7 +739,7 @@ def _make_agent(
         verbose_logging=False,  # DEBUG agent logging; independent of tool_progress_mode
         reasoning_config=(
             reasoning_config_override if reasoning_config_override is not None else _load_reasoning_config(str(model or ""))),
-        service_tier=service_tier_override if service_tier_override is not None else _load_service_tier(),
+        service_tier=tier,
         enabled_toolsets=onboarding_toolsets(_load_enabled_toolsets(platform),
                                              session_db if session_db is not None else _get_db(), session_id or key,
                                              persistence=persistence if session_db is not None else _launch_persistence()),
@@ -725,6 +761,7 @@ def _make_agent(
         # The resolved provider's request body (a custom entry's extra_body), as the CLI/cron/gateway pass it.
         request_overrides=runtime.get("request_overrides"),
         prefill_messages=_load_prefill_messages() or None, **_agent_cbs(sid))
+    _apply_session_service_tier(agent, tier, explicit=service_tier_override is not None)
     if context_cwd_is_launch_artifact is None:
         context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(session)
     agent._context_cwd_is_launch_artifact = bool(context_cwd_is_launch_artifact)

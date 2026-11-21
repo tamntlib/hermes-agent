@@ -476,10 +476,41 @@ _FAST_TIERS = {"fast": "priority", "on": "priority", "normal": None, "off": None
                "ultrafast": "ultrafast", "ultra": "ultrafast"}
 
 
+def _mirror_fast_admitted(session: dict | None, agent, tier: str | None) -> bool:
+    """Reject /fast ultrafast on routes where the CLI slash worker also rejects it."""
+    if tier != "ultrafast":
+        return True
+    from agent.codex_service_tiers import ultrafast_offered
+    from hermes_cli.models import resolve_fast_mode_overrides
+    if agent is not None:
+        model, provider, base_url, api_key = (
+            getattr(agent, "model", None), getattr(agent, "provider", None),
+            getattr(agent, "base_url", None), getattr(agent, "api_key", None),
+        )
+    else:
+        override = (session or {}).get("model_override") or {}
+        model = (isinstance(override, dict) and override.get("model")) or _resolve_model()
+        provider = override.get("provider") if isinstance(override, dict) else None
+        base_url = override.get("base_url") if isinstance(override, dict) else None
+        api_key = None
+    return (
+        resolve_fast_mode_overrides(model, provider=provider, base_url=base_url, tier="ultrafast") is not None
+        and ultrafast_offered(model, provider=provider, base_url=base_url, access_token=api_key)
+    )
+
+
 def _mirror_fast(sid, session, agent, arg) -> None:
+    word = " ".join(tok for tok in arg.strip().lower().split() if tok not in ("--global", "--session"))
+    if word in _FAST_TIERS:
+        tier = _FAST_TIERS[word]
+        if _mirror_fast_admitted(session, agent, tier):
+            if session is not None:
+                session["create_service_tier_override"] = "" if tier is None else tier
+            if agent is not None:
+                agent.service_tier = tier
+                _apply_session_service_tier(agent, tier, explicit=True)
+                _persist_live_session_runtime(session)
     if agent:
-        if arg.lower() in _FAST_TIERS:
-            agent.service_tier = _FAST_TIERS[arg.lower()]
         _emit("session.info", sid, _session_info(agent, session))
 
 

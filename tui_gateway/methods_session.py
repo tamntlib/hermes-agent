@@ -547,7 +547,7 @@ class _Resume:
         if follows_profile:
             record.update(follow_profile_config=True, composer_override_profile=(
                 model_config.get("composer_override_profile") if overrides and overrides.get("model_override") else None))
-        return record
+        return _pin_restored_service_tier(record, overrides)
 
     def claim(self, sid: str, record: dict) -> dict | None:
         """Register ``record`` live under the resume lock, or reuse a concurrent winner's session; then repair a
@@ -915,7 +915,7 @@ def _resume_eager(ctx: _Resume) -> dict:
                 if ctx.owns_db:
                     _transfer_db_to_agent(agent, ctx.db)
                 ctx.owns_db, ctx.persistence = False, None
-            if (session := _sessions.get(sid)) is not None:
+            if (session := _pin_restored_service_tier(_sessions.get(sid), stored_runtime_overrides)) is not None:
                 if stored_runtime_overrides.get("model_override") is not None:
                     session["model_override"] = stored_runtime_overrides["model_override"]
                 model_config = _parse_model_config(ctx.found.get("model_config"), quiet=True)
