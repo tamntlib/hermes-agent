@@ -149,7 +149,6 @@ import {
 import {
   apiRequestRegistryConnectionId,
   authModeFromStatus,
-  buildGatewayWsUrl,
   buildGatewayWsUrlWithTicket,
   connectionScopeKey,
   cookiesHaveLiveSession,
@@ -194,6 +193,7 @@ import {
   profileMetadataFromApiProfiles,
   reconcileAppliedGlobalConnection,
   registryDialConnectionId,
+  registryDialSource,
   registrySourceOwnsPrimaryBackend,
   rememberSshEnumeration,
   type ResolvedConnectionDescriptor,
@@ -286,7 +286,10 @@ import {
   saveGatewayDownload
 } from './gateway-file-download'
 import { downloadViaOauthSessionToFile, downloadViaTokenToFile } from './gateway-file-download-transport'
+import { GatewaySshTunnels, gatewayTunnelFingerprint } from './gateway-ssh-tunnel'
 import { stopGatewayBeforeUpdate } from './gateway-stop-before-update'
+import { probeGatewayTunnel, resetWindowGatewayTunnel, revalidateDesktopRemoteConnections } from './gateway-tunnel-recovery'
+import { createGatewayTunnelRuntime, invalidateExternalGatewayRuntime } from './gateway-tunnel-runtime'
 import { resolveGatewayVersion } from './gateway-version'
 import { probeGatewayWebSocket } from './gateway-ws-probe'
 import { windowsGitCandidates } from './git-binary-candidates'
@@ -392,10 +395,9 @@ import { fetchLocalMedia } from './media-range'
 import { createMinimizeToTray } from './minimize-to-tray'
 import {
   createNativeAccessTokenCoordinator,
-  type NativeAccessTokenOptions,
   NativeAuthChangedError
 } from './native-access-token'
-import { oauthSessionIsLive, resolveJsonBody, resolveReadinessProbeAuth } from './native-auth-decisions'
+import { oauthSessionIsLive, resolveJsonBody } from './native-auth-decisions'
 import {
   nativeRefreshUrl,
   type NativeTokenSet,
@@ -416,7 +418,6 @@ import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition
 import {
   canShowInteractiveOauthLogin,
   mintGatewayWsTicket as mintOauthGatewayWsTicket,
-  requestWithOauthFallback,
   retryCookie401WithLogin,
   withoutInteractiveOauthLogin
 } from './oauth-rest-request'
@@ -492,6 +493,7 @@ import {
   tagRegistrySessionResponse,
   tagRemoteSessionRows
 } from './profile-session-routing'
+import { createPublicJsonFetcher } from './public-json-request'
 import {
   createQuickEntryShortcut,
   createQuickEntrySubmitRelay,
@@ -523,6 +525,7 @@ import {
 } from './registry-backend-identity'
 import { collectRegistrySessionSources } from './registry-session-sources'
 import { releaseHolderRetry } from './release-holder-consent'
+import { createRemoteGatewayServices } from './remote-gateway-services'
 import * as remoteLifecycle from './remote-lifecycle'
 import {
   attachPowerResumeRemoteRevalidation,
@@ -531,10 +534,9 @@ import {
   RemoteLivenessTracker,
   RemoteRevalidationCoordinator,
   revalidatePooledRemoteBackends,
-  revalidateRemoteConnection,
   revalidateSuspectPooledRemoteBackends
 } from './remote-liveness'
-import { resolveRemoteOauthTicket, rosterSourceEnumerationTimeoutMs } from './remote-oauth-ticket'
+import { rosterSourceEnumerationTimeoutMs } from './remote-oauth-ticket'
 import { createRemoteOwnerCache } from './remote-owner-cache'
 import { remoteSessionCookies } from './remote-session-cookies'
 import {
@@ -581,7 +583,7 @@ import { registerSpellcheckDictionaryIpc } from './spellcheck-dictionary-ipc'
 import { resolveSshBinary, windowsSshEnv } from './ssh-binary'
 import { createBootstrapCoordinator, sshConfigFingerprint } from './ssh-bootstrap-coordinator'
 import { collectSshConfigHosts, parseSshGOutput } from './ssh-config'
-import { createSshProbeConnection, pickLocalPort, redactSecrets, SshConnection } from './ssh-connection'
+import { createSshProbeConnection, defaultControlDir, pickLocalPort, redactSecrets, SshConnection } from './ssh-connection'
 import { createSshIsolatedKeepaliveRegistry } from './ssh-isolated-keepalive'
 import { managedSshConfig, resolveSharedSshProfileBackend, sharedSshProfiles } from './ssh-shared-profile-backend'
 import { createSshTeardownTracker } from './ssh-teardown'
@@ -590,6 +592,7 @@ import { registerStreamWorkClock } from './stream-work-clock'
 import { installSystemCaTrust } from './system-ca'
 import { terminalGatewayTarget } from './terminal-gateway-target'
 import { registerTerminalIpc } from './terminal-ipc'
+import { resolveTerminalTarget } from './terminal-target'
 import { applyTitleBarOverlay, isHexColor, nativeOverlayWidth, titleBarOverlayOptions } from './titlebar-overlay-width'
 import {
   applyWindowsBackdrop,
@@ -1820,10 +1823,13 @@ function registerMediaProtocol(): void {
       electronNet.fetch(url, {
         bypassCustomProtocolHandlers: true,
         credentials: 'omit',
+        redirect: gatewayTunnelRequest(url) ? 'manual' : 'follow',
+        signal: gatewayTunnelRequest(url)?.signal,
         headers,
         method
       }),
     fetchRemoteWithCookies: (url, headers, method) => {
+      if (gatewayTunnelRequest(url)) {throw new Error('SSH Gateway cookie transport is disabled.')}
       const oauthSession = getOauthSessionForUrl(url)
 
       if (!oauthSession) {
@@ -5190,11 +5196,15 @@ function multipartBody(upload) {
 }
 
 function fetchJson(url, token, options: any = {}) {
+  const tunnelSnapshot = gatewayTunnelRequest(url)
+
   // Retry policy lives in api-transport.ts: idempotent verbs retry on any
   // transient transport error; POST/PUT/DELETE only when the request provably
   // never reached the server (see shouldRetryRequest) — never double-submit.
   return withRetry(
     async (requestState: any) => {
+      if (tunnelSnapshot) {gatewaySshTunnels.assertCurrent(tunnelSnapshot)}
+
       // Mint inside each retry: a grant authorizes exactly one HTTP request.
       const nativeHeaders = options.gatewayDescriptor
         ? await nativeGatewayHttpHeaders(options.gatewayDescriptor, url, HERMES_HOME, options.method || 'GET', options.upload ? undefined : options.body)
@@ -5210,7 +5220,7 @@ function fetchJson(url, token, options: any = {}) {
 
         const parsed = new URL(url)
         const client = parsed.protocol === 'https:' ? https : http
-        const agent = jsonAgentFor(parsed.protocol)
+        const agent = tunnelSnapshot?.agent || jsonAgentFor(parsed.protocol)
         const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
 
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -5223,12 +5233,13 @@ function fetchJson(url, token, options: any = {}) {
           parsed,
           {
             agent,
+            signal: tunnelSnapshot?.signal,
             method: options.method || 'GET',
             headers: {
-              ...headersForRemoteRequest(url),
+              ...(tunnelSnapshot ? {} : headersForRemoteRequest(url)),
               ...(options.headers || {}),
               'Content-Type': contentType,
-              ...(nativeHeaders || { 'X-Hermes-Session-Token': token }),
+              ...(nativeHeaders || (tunnelSnapshot ? {} : { 'X-Hermes-Session-Token': token })),
               // RFC 8252 native flow authenticates the gated gateway with a bearer
               // token instead of the loopback session-token header. When
               // ``options.bearer`` is set we send Authorization: Bearer <token>;
@@ -5239,10 +5250,31 @@ function fetchJson(url, token, options: any = {}) {
             }
           },
           res => {
+            if (tunnelSnapshot) {
+              try {
+                gatewaySshTunnels.assertCurrent(tunnelSnapshot)
+              } catch (error) {
+                res.destroy()
+                reject(error)
+
+                return
+              }
+            }
+
             const chunks = []
             res.on('error', reject)
             res.on('data', chunk => chunks.push(chunk))
             res.on('end', () => {
+              if (tunnelSnapshot) {
+                try {
+                  gatewaySshTunnels.assertCurrent(tunnelSnapshot)
+                } catch (error) {
+                  reject(error)
+
+                  return
+                }
+              }
+
               const text = Buffer.concat(chunks).toString('utf8')
 
               if ((res.statusCode || 500) >= 400) {
@@ -5309,107 +5341,11 @@ function fetchJson(url, token, options: any = {}) {
   )
 }
 
-function fetchPublicJson(url, options: any = {}) {
-  // Credential-free JSON GET/POST for public gateway endpoints
-  // (``/api/status``, ``/api/auth/providers``). Unlike ``fetchJson`` it sends
-  // NO ``X-Hermes-Session-Token`` header — used by the auth-mode probe before
-  // any credentials exist, and any time we must not leak a token to an
-  // endpoint that doesn't need one.
-  return withRetry(
-    (requestState: any) =>
-      new Promise((resolve, reject) => {
-        const body = options.body === undefined ? undefined : Buffer.from(JSON.stringify(options.body))
-        let parsed
-
-        try {
-          parsed = new URL(url)
-        } catch (error) {
-          reject(new Error(`Invalid URL: ${error.message}`))
-
-          return
-        }
-
-        const client = parsed.protocol === 'https:' ? https : http
-        const agent = jsonAgentFor(parsed.protocol)
-        const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
-
-        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-          reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
-
-          return
-        }
-
-        const req = client.request(
-          parsed,
-          {
-            agent,
-            method: options.method || 'GET',
-            headers: {
-              ...headersForRemoteRequest(url),
-              ...(options.headers || {}),
-              'Content-Type': 'application/json',
-              ...(body ? { 'Content-Length': String(body.length) } : {})
-            }
-          },
-          res => {
-            const chunks = []
-            res.on('data', chunk => chunks.push(chunk))
-            res.on('end', () => {
-              const text = Buffer.concat(chunks).toString('utf8')
-
-              if ((res.statusCode || 500) >= 400) {
-                reject(httpStatusError(res.statusCode, text, res.statusMessage))
-
-                return
-              }
-
-              if (res.statusCode >= 300) {
-                reject(htmlResponseError(url, res.statusCode, res.headers.location))
-
-                return
-              }
-
-              if (!text) {
-                resolve(null)
-
-                return
-              }
-
-              const looksHtml = /^\s*<(?:!doctype|html)/i.test(text)
-              const contentType = String(res.headers['content-type'] || '')
-
-              if (looksHtml || contentType.includes('text/html')) {
-                reject(htmlResponseError(url, res.statusCode))
-
-                return
-              }
-
-              try {
-                resolve(JSON.parse(text))
-              } catch {
-                reject(new Error(`Invalid JSON from ${url} (status ${res.statusCode}): ${text.slice(0, 200)}`))
-              }
-            })
-          }
-        )
-
-        req.on('error', reject)
-        req.setTimeout(timeoutMs, () => {
-          req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
-        })
-
-        // Past this point the request is on the wire — see fetchJson.
-        requestState.bodySent = true
-
-        if (body) {
-          req.write(body)
-        }
-
-        req.end()
-      }),
-    { method: options.method || 'GET' }
-  )
-}
+const fetchPublicJson = createPublicJsonFetcher({
+  tunnelForUrl: url => gatewayTunnelRequest(url),
+  assertCurrent: snapshot => gatewaySshTunnels.assertCurrent(snapshot),
+  headersForUrl: headersForRemoteRequest
+})
 
 function mimeTypeForPath(filePath) {
   const ext = path.extname(filePath || '').toLowerCase()
@@ -5930,40 +5866,6 @@ async function gatewayAuthProviders(baseUrl, headers = {}) {
   return providers
 }
 
-// Build the readiness probe for a connection's auth mode. A gated gateway
-// must be probed with the SAME credentials the rest of the connection uses:
-// an anonymous probe 401s forever against a live session, and it can never
-// see the 404 that identifies a backend predating /api/health (the auth gate
-// answers before the SPA catch-all). `probeIsCredentialed` tells
-// waitForHermesReady how to read a 401 — rejected session vs gated route.
-async function buildReadinessHealthProbe(baseUrl, authMode, token) {
-  if (authMode === 'oauth') {
-    return {
-      // fetchJson takes the bearer via `options.bearer` — a raw `headers`
-      // option is ignored, so passing one here would silently probe
-      // uncredentialed and reintroduce the 401 loop.
-      probeHealth: (url: string, options: any = {}) =>
-        requestWithOauthFallback(baseUrl, {
-          ensureNativeAccessToken,
-          requestWithBearer: (bearer: string) => fetchJson(url, null, { ...options, bearer }),
-          requestWithCookie: () => fetchJsonViaOauthSession(url, options)
-        }),
-      probeIsCredentialed: true
-    }
-  }
-
-  const probeAuth = resolveReadinessProbeAuth(authMode, null, token)
-
-  if (probeAuth.kind === 'token' && probeAuth.token) {
-    return {
-      probeHealth: (url, options: any = {}) => fetchJson(url, probeAuth.token, options),
-      probeIsCredentialed: true
-    }
-  }
-
-  return { probeHealth: fetchPublicJson, probeIsCredentialed: false }
-}
-
 // Boot-time readiness for a remote connection object. For a Hermes Cloud agent
 // whose own session cookie has expired, `waitForHermes` ends in the terminal
 // reauth error even though the portal session that can silently re-mint that
@@ -6223,7 +6125,7 @@ function registerPowerResumeListeners() {
     attachPowerResumeRemoteRevalidation({
       log: rememberLog,
       powerMonitor,
-      revalidate: () => revalidateSuspectPoolAfterResume()
+      revalidate: () => Promise.all([revalidateSuspectPoolAfterResume(), gatewaySshTunnels.revalidate(rememberLog)])
     })
   } catch {
     // powerMonitor is unavailable before app 'ready' on some platforms; the
@@ -7116,6 +7018,9 @@ function openOauthLoginWindow(
 //      vouched replay-safe (`options.replayOn401`). Anything else keeps the
 //      no-replay rule of requestWithOauthFallback.
 function fetchJsonViaOauthSession(url, options: any = {}) {
+  const tunnelSnapshot = gatewayTunnelRequest(url)
+
+  if (tunnelSnapshot) {throw new Error('SSH Gateway requires native sign-in; cookie fallback is disabled.')}
   const partition = resolveOauthPartitionForUrl(url)
 
   const attempt = (): Promise<unknown> =>
@@ -7325,10 +7230,10 @@ const nativeAccessTokenCoordinator: ReturnType<typeof createNativeAccessTokenCoo
     isRefreshAuthRejection: (error: unknown): boolean => readStatusCode(error) === 401,
     loadTokens: _loadNativeTokens,
     normalizeBaseUrl: normalizeRemoteBaseUrl,
-    refreshTokens: async (baseUrl: string, tokens: NativeTokenSet): Promise<NativeTokenSet> =>
+    refreshTokens: async (baseUrl: string, tokens: NativeTokenSet, transportBaseUrl?: string): Promise<NativeTokenSet> =>
       parseTokenResponse(
         await postJsonNoAuth(
-          nativeRefreshUrl(baseUrl),
+          nativeRefreshUrl(transportBaseUrl || gatewaySshTunnels.forCanonical(baseUrl)?.dialBaseUrl || baseUrl),
           { refresh_token: tokens.refreshToken, provider: tokens.provider },
           { timeoutMs: 10_000 }
         )
@@ -7336,12 +7241,6 @@ const nativeAccessTokenCoordinator: ReturnType<typeof createNativeAccessTokenCoo
     storeTokens: _storeNativeTokens,
     tokenNeedsRefresh
   })
-
-// Return a valid native access token for baseUrl, refreshing via
-// /auth/native/refresh if the stored one is at/near expiry. Returns null when
-// there are no tokens or the refresh is terminally rejected (caller re-logins).
-const ensureNativeAccessToken: (baseUrl: string, options?: NativeAccessTokenOptions) => Promise<string | null> =
-  nativeAccessTokenCoordinator.ensure
 
 interface GatewayFileConnection extends RegistryBackendRequestScope {
   gatewayEndpoint?: GatewayEndpoint
@@ -7407,7 +7306,7 @@ async function saveGatewayFile(payload: GatewayFileSavePayload = {}): Promise<Ga
         return requestWithOauthFallback(connection.baseUrl, {
           ensureNativeAccessToken,
           requestWithBearer: (bearer: string): Promise<GatewayFileSaveResult> =>
-            downloadViaTokenToFile(url, null, context, deps, { bearer }),
+            downloadViaTokenToFile(url, null, context, deps, { bearer, signal: gatewayTunnelRequest(url)?.signal, agent: gatewayTunnelRequest(url)?.agent }),
           requestWithCookie: (): Promise<GatewayFileSaveResult> =>
             downloadViaOauthSessionToFile<Session>(url, context, {
               ...deps,
@@ -7482,7 +7381,7 @@ async function mintGatewayWsTicket(baseUrl: string, headers: Record<string, stri
   return recoverCloudCookieSession(baseUrl, () =>
     withTransientRetries(
       (): Promise<string> =>
-        mintOauthGatewayWsTicket(baseUrl, { ensureNativeAccessToken, fetchJson, fetchJsonViaOauthSession }, headers),
+        mintOauthGatewayWsTicket(baseUrl, { ensureNativeAccessToken, fetchJson, fetchJsonViaOauthSession, nativeOnly: Boolean(gatewayTunnelRequest(baseUrl)) }, headers),
       {
         isRetryable: (error: Error): boolean =>
           !(error instanceof NativeAuthChangedError) && !isGatewayAuthRejection(error)
@@ -8142,6 +8041,10 @@ function installRemoteHeaderRulesOnSession(sess) {
     const injectedByRequest: InjectedHeadersByRequest = new Map()
 
     sess.webRequest.onBeforeSendHeaders((details, callback) => {
+      try { gatewayTunnelRequest(details.url) } catch { callback({ cancel: true });
+
+ return }
+
       const nativeHeaders = localGatewayDials.headers(details)
 
       if (nativeHeaders) {
@@ -8397,7 +8300,7 @@ function writeDesktopConnectionsRegistry(registry) {
  * sanitizeDesktopConnectionConfig.
  */
 function sanitizeRegistryConnection(entry) {
-  const { token, headers, ...rest } = entry
+  const { token, headers, sshTunnel, ...rest } = entry
   const decrypted = decryptDesktopSecret(token)
   // Last-known stable backend identity (from roster enumeration / Test) so
   // Settings can hint "Same backend as <label>" on connections that are two
@@ -8406,6 +8309,7 @@ function sanitizeRegistryConnection(entry) {
 
   return {
     ...rest,
+    ...(!entry.sshTunnelError && sshTunnel ? { sshTunnel } : {}),
     tokenSet: Boolean(decrypted),
     tokenPreview: tokenPreview(decrypted),
     ...(knownInstallId ? { installId: knownInstallId } : {}),
@@ -8486,6 +8390,11 @@ async function saveRegistryConnection(input: any = {}) {
 
   if (existing && connectionDialFieldsChanged(existing, entry)) {
     managedConnectionUpdateGate.assertCanMutate(entry.id)
+  }
+
+  if (existing && connectionDialFieldsChanged(existing, entry)) {
+    await gatewaySshTunnels.invalidate(entry.id)
+    terminalIpc.disposeTerminalSessionsForConnection(entry.id)
   }
 
   writeDesktopConnectionsRegistry(upsertConnection(registry, entry))
@@ -8583,6 +8492,28 @@ function migrateActiveProfileIfMissing() {
   })
 }
 
+async function isRemoteOauthConnected(remoteUrl: string, authMode: string, block: any): Promise<boolean> {
+  if (authMode !== 'oauth' || !remoteUrl) {
+    return false
+  }
+
+  try {
+    // Display signal: treat a live RT cookie as "connected" even if the AT
+    // cookie has lapsed — the gateway refreshes the AT on the next request,
+    // so the session is still usable. A stored native bearer token (cookieless
+    // RFC 8252 flow) counts as connected too — otherwise a completed native
+    // sign-in shows "not connected" in Settings. The authoritative liveness
+    // check is the ws-ticket mint in resolveRemoteBackend at actual connect time.
+    const registry = readDesktopConnectionsRegistry()
+    const id = resolvedConnectionId(registry, { mode: 'remote', remoteKind: 'url', baseUrl: remoteUrl, authMode, headers: block.headers ?? {}, token: block.token })
+    const nativeOnly = registry.connections.some(source => source.id === id && (source.sshTunnel || source.sshTunnelError))
+
+    return oauthSessionIsLive(hasNativeSession(remoteUrl), nativeOnly ? false : await hasLiveOauthSession(remoteUrl), nativeOnly)
+  } catch {
+    return false
+  }
+}
+
 // Sanitize a connection config into the renderer-facing shape. With no
 // `profile` this describes the global/default connection (the existing
 // behavior); with a `profile` it describes that profile's per-profile remote
@@ -8617,22 +8548,7 @@ async function sanitizeDesktopConnectionConfig(config = readDesktopConnectionCon
   // cannot secure it (see probeSecureTokenStorage). The env override supplies
   // its token from the environment, so it never reports as plain text here.
   const remoteTokenPlainText = resolveRemoteTokenPlainText({ envOverride, secureTokenStorage, token: block.token })
-
-  let remoteOauthConnected = false
-
-  if (authMode === 'oauth' && remoteUrl) {
-    try {
-      // Display signal: treat a live RT cookie as "connected" even if the AT
-      // cookie has lapsed — the gateway refreshes the AT on the next request,
-      // so the session is still usable. A stored native bearer token (cookieless
-      // RFC 8252 flow) counts as connected too — otherwise a completed native
-      // sign-in shows "not connected" in Settings. The authoritative liveness
-      // check is the ws-ticket mint in resolveRemoteBackend at actual connect time.
-      remoteOauthConnected = oauthSessionIsLive(hasNativeSession(remoteUrl), await hasLiveOauthSession(remoteUrl))
-    } catch {
-      remoteOauthConnected = false
-    }
-  }
+  const remoteOauthConnected = await isRemoteOauthConnected(remoteUrl, authMode, block)
 
   return {
     mode,
@@ -8807,79 +8723,32 @@ function buildSshBlock(input: any, existingBlock: any = {}) {
   return merged
 }
 
-// Build a remote backend connection descriptor from an already-resolved remote
-// config. Handles both auth models (OAuth ws-ticket vs static session token)
-// and is shared by the per-profile, env, and global resolution paths. `token`
-// is the DECRYPTED static token (or null in OAuth mode). `source` is a label
-// for diagnostics ('profile' | 'env' | 'settings').
-async function buildRemoteConnection(
-  rawUrl,
-  authMode,
-  token,
-  source,
-  remoteHost?,
-  remoteKind = 'url',
-  remoteIdentity?,
-  headers?
-) {
-  const baseUrl = normalizeRemoteBaseUrl(rawUrl)
-  const remoteHeaders = decryptRemoteHeaders(headers)
-  // For token/oauth remotes the meaningful host is the real backend URL; for
-  // SSH remotes the caller passes the entered/resolved host explicitly (the
-  // baseUrl is a 127.0.0.1 tunnel and would be useless in the pill).
-  const host = remoteHost || hostLabelFromBaseUrl(baseUrl)
-
-  if (authMode === 'oauth') {
-    const ticket = await resolveRemoteOauthTicket(baseUrl, remoteHeaders, {
-      hasNativeSession,
-      mintGatewayWsTicket
-    })
-
-    const wsUrl = buildGatewayWsUrlWithTicket(baseUrl, ticket)
-
-    rememberRemoteWsHeaders(wsUrl, remoteHeaders)
-
-    return {
-      baseUrl,
-      mode: 'remote',
-      source,
-      authMode: 'oauth',
-      remoteHost: host || undefined,
-      remoteIdentity,
-      remoteKind,
-      headers: remoteHeaders,
-      // No static token in OAuth mode; REST is cookie-authed via the partition.
-      token: null,
-      wsUrl
-    }
-  }
-
-  if (!token) {
-    throw new Error(
-      'Remote Hermes gateway is selected, but no session token is saved. ' +
-        'Open Settings → Gateway and save a token, or switch back to Local.'
-    )
-  }
-
-  const wsUrl = buildGatewayWsUrl(baseUrl, token)
-
-  rememberRemoteWsHeaders(wsUrl, remoteHeaders)
-
-  return {
-    baseUrl,
-    mode: 'remote',
-    source,
-    authMode: 'token',
-    remoteHost: host || undefined,
-    remoteIdentity,
-    remoteKind,
-    headers: remoteHeaders,
-    token,
-    wsUrl
-  }
-}
-
 const sshConnections = new Map<string, any>()
+
+const tunnelDraftSources = new Map<number, RegistryConnection>()
+
+const gatewaySshTunnels = new GatewaySshTunnels({
+  controlDir: defaultControlDir(),
+  createTransport: (config, options) => new SshConnection(config, { ...desktopSshBudgets, ...options, sshBinary: desktopSshBinary(), rememberLog: sshRememberLog }),
+  pickPort: () => pickLocalPort() as Promise<number>,
+  isSourceCurrent: (id, fingerprint) => {
+    const source = id.startsWith('draft:')
+      ? tunnelDraftSources.get(Number(id.slice(6)))
+      : readDesktopConnectionsRegistry().connections.find(connection => connection.id === id)
+
+    return Boolean(source && gatewayTunnelFingerprint(source) === fingerprint)
+  },
+  probe: snapshot => probeGatewayTunnel(snapshot, fetchPublicJson, value => gatewaySshTunnels.assertCurrent(value))
+})
+
+const { gatewayTunnelRequest, resolveGatewayTunnelSource, gatewayTunnelForDraft, signInTunnelGateway, sshGatewayDescriptor, requestWithOauthFallback, ensureNativeAccessToken } = createGatewayTunnelRuntime({
+  gatewaySshTunnels, tunnelDraftSources, readDesktopConnectionsRegistry, nativeAccessTokenCoordinator,
+  postJsonNoAuth, openExternalUrl, descriptorMeta: () => ({ logs: hermesLog.slice(-80), ...getWindowState() }), clearReauth: () => { remoteReauthFailure = null }
+})
+
+const { buildRemoteConnection, buildReadinessHealthProbe, resolveRemoteTestBaseUrl } = createRemoteGatewayServices({
+  readDesktopConnectionsRegistry, resolveGatewayTunnelSource, decryptRemoteHeaders, mintGatewayWsTicket, hasNativeSession, rememberRemoteWsHeaders, fetchJson, ensureNativeAccessToken, requestWithOauthFallback, fetchJsonViaOauthSession, fetchPublicJson
+})
 
 const sshIsolatedKeepalives = createSshIsolatedKeepaliveRegistry({
   log: chunk => sshRememberLog(chunk)
@@ -9186,6 +9055,25 @@ function activeSshTerminalTarget(webContentsId?: number) {
   const state = sshConnections.get(scope)
 
   return state && state.ssh ? { ssh: state.ssh, scope } : 'pending'
+}
+
+function terminalTargetForWindow(webContentsId: number) {
+  const registry = readDesktopConnectionsRegistry()
+  const windowRoute = windowConnectionRoutes.get(webContentsId)
+  const profile = windowRoute?.profile ?? primaryProfileKey()
+
+  return resolveTerminalTarget({
+    registry,
+    windowRoute,
+    profile,
+    legacyRoute: () => resolveDesktopRemoteRoute({
+      config: readDesktopConnectionConfig(),
+      env: { token: process.env.HERMES_DESKTOP_REMOTE_TOKEN, url: process.env.HERMES_DESKTOP_REMOTE_URL },
+      profile,
+      registry
+    }),
+    managedTarget: () => activeSshTerminalTarget(webContentsId)
+  })
 }
 
 async function ensureTerminalBackend(webContentsId: number) {
@@ -9629,6 +9517,28 @@ function persistSshConnectionToken(profile, source, token, registryConnectionId 
   }
 }
 
+function assertPrimaryTunnelReady(registry) {
+  const primarySource = registry.connections.find(connection => connection.id === registry.primary)
+
+  if (primarySource?.sshTunnelError) {
+    throw new Error(primarySource.sshTunnelError)
+  }
+}
+
+function resolveNonRegistryRemoteConnectionId(registry, route) {
+  if (route.kind !== 'remote' || route.source === 'registry') {
+    return
+  }
+
+  const uniqueId = resolvedConnectionId(registry, { mode: 'remote', remoteKind: 'url', baseUrl: route.url, authMode: route.authMode, token: route.token, headers: route.headers ?? {} })
+
+  if (!uniqueId && registry.connections.some(connection => connection.kind === 'remote' && (connection.sshTunnel || connection.sshTunnelError))) {
+    throw new Error('Select the SSH Gateway in Connections before connecting.')
+  }
+
+  route.connectionId = uniqueId || undefined
+}
+
 // Resolve the remote backend for a given profile, or null when that profile
 // should run a LOCAL backend. Precedence:
 //   1. explicit per-profile remote override (connection.json `profiles[name]`)
@@ -9693,6 +9603,8 @@ async function resolveRemoteBackend(
   const config = readDesktopConnectionConfig()
   const registry = readDesktopConnectionsRegistry()
 
+  assertPrimaryTunnelReady(registry)
+
   const route = options.forceRegistryPrimary
     ? registryPrimaryBootRoute(registry)
     : resolveDesktopRemoteRoute({
@@ -9730,6 +9642,8 @@ async function resolveRemoteBackend(
       }
     )
   } else {
+    resolveNonRegistryRemoteConnectionId(registry, route)
+
     const token =
       route.authMode === 'oauth' ? null : route.source === 'env' ? route.token : decryptDesktopSecret(route.token)
 
@@ -9741,7 +9655,8 @@ async function resolveRemoteBackend(
       undefined,
       route.kind === 'cloud' ? 'cloud' : 'url',
       undefined,
-      route.headers
+      route.headers,
+      route.connectionId
     )
   }
 
@@ -9937,7 +9852,7 @@ async function testDesktopConnectionConfig(input: any = {}) {
   let testHeaders = {}
 
   if (wantRemote && block?.url) {
-    baseUrl = normalizeRemoteBaseUrl(block.url)
+    baseUrl = await resolveRemoteTestBaseUrl(block)
     authMode = normAuthMode(block.authMode)
     testHeaders = decryptRemoteHeaders(block.headers)
 
@@ -10173,6 +10088,21 @@ async function ensureBackend(
   const request = primaryBootRequest(profile, primaryProfileKey(), opts.inheritsPrimary)
   const key = request.key
   const passive = Boolean(opts.passive)
+  const tunnelRegistry = readDesktopConnectionsRegistry()
+
+  const tunnelRoute = resolveDesktopRemoteRoute({ config: readDesktopConnectionConfig(),
+    env: { token: process.env.HERMES_DESKTOP_REMOTE_TOKEN, url: process.env.HERMES_DESKTOP_REMOTE_URL },
+    profile: key, registry: tunnelRegistry })
+
+  if (tunnelRoute?.kind === 'remote') {
+    const id = tunnelRoute.source === 'registry' ? tunnelRoute.connectionId : resolvedConnectionId(tunnelRegistry, {
+      mode: 'remote', remoteKind: 'url', baseUrl: tunnelRoute.url, authMode: tunnelRoute.authMode,
+      headers: tunnelRoute.headers ?? {}, token: tunnelRoute.token })
+
+    const source = tunnelRegistry.connections.find(connection => connection.id === id)
+
+    if (source?.sshTunnel || source?.sshTunnelError) {return sshGatewayDescriptor(source, key)}
+  }
 
   profileDeletionGate.assertCanStart(key)
 
@@ -10238,18 +10168,16 @@ async function ensureRegistryBackend(
 ) {
   const passive = Boolean(opts.passive)
   const registry = readDesktopConnectionsRegistry()
-  const id = registryDialConnectionId(connectionId, registry.primary)
-  const source = registry.connections.find(c => c.id === id)
-
-  if (!source) {
-    throw new Error(`No connection with id "${id}".`)
-  }
+  const source = registryDialSource(registry, connectionId)
+  const id = source.id
 
   if (source.kind === 'ssh') {
     managedConnectionUpdateGate.assertCanDial(id, managedUpdateCorrelation)
   }
 
   const profileKey = String(profile ?? '').trim() || 'default'
+
+  if (source.sshTunnel || source.sshTunnelError) {return sshGatewayDescriptor(source, profileKey)}
   let resolvedRegistrySshConfig
   let registryEffectiveFingerprintPromise: null | Promise<string> = null
 
@@ -10513,7 +10441,8 @@ async function connectRegistryBackend(
     undefined,
     source.kind === 'cloud' ? 'cloud' : 'url',
     undefined,
-    source.headers
+    source.headers,
+    source.id
   )
 
   await waitForRemoteHermes(connection)
@@ -13711,46 +13640,22 @@ ipcMain.on('hermes:connection:active-route', (event, route) => recordWindowConne
 // to confirm the cached PRIMARY backend is still reachable; if a remote one is
 // not, we drop the cache so the next getConnection() rebuilds it. Local backends
 // self-heal via their child 'exit' handler, so we never touch them here.
-ipcMain.handle('hermes:connection:revalidate', async () => {
-  const connectionPromise = backendConnectionState.getPromise()
+ipcMain.handle('hermes:connection:revalidate', () => revalidateDesktopRemoteConnections({
+  connectionPromise: backendConnectionState.getPromise(),
+  currentConnectionPromise: () => backendConnectionState.getPromise(),
+  coordinator: remoteRevalidation,
+  log: rememberLog,
+  probe: (connection, path, options) => fetchJsonForBackend(connection, path, options),
+  resetConnection: () => resetHermesConnectionState({ soft: true }),
+  tracker: remoteLiveness,
+  revalidatePool,
+  revalidateTunnels: () => gatewaySshTunnels.revalidate(rememberLog),
+  teardownSsh: () => {
+    const profile = primaryProfileKey()
 
-  if (!connectionPromise) {
-    await revalidatePool()
-
-    return { ok: true, rebuilt: false }
+    return sshBootstrapCoordinator.cancelAndWait(sshScopeKey(profile), () => teardownSshConnection(profile))
   }
-
-  // Main and every session pop-out have their own renderer reconnect loop but
-  // share this primary connection. Coalesce simultaneous requests so one outage
-  // produces one failure observation rather than exhausting the whole streak.
-  return remoteRevalidation.run(connectionPromise, async () => {
-    const [result] = await Promise.all([
-      revalidateRemoteConnection({
-        connectionPromise,
-        currentConnectionPromise: () => backendConnectionState.getPromise(),
-        log: rememberLog,
-        probe: (connection, path, options) => fetchJsonForBackend(connection, path, options),
-        resetConnection: () => resetHermesConnectionState({ soft: true }),
-        tracker: remoteLiveness
-      }),
-      revalidatePool()
-    ])
-
-    // A rebuilt SSH connection must also tear down its tunnel/master before the
-    // renderer re-dials (which only happens after this handler resolves), so the
-    // fresh bootstrap can't reattach to a dying transport.
-    if (result.rebuilt) {
-      const conn = await connectionPromise.catch(() => null)
-
-      if (conn?.remoteKind === 'ssh') {
-        const profile = primaryProfileKey()
-        await sshBootstrapCoordinator.cancelAndWait(sshScopeKey(profile), () => teardownSshConnection(profile))
-      }
-    }
-
-    return result
-  })
-})
+}))
 
 // Pooled remote descriptors get the same treatment as the primary: they have no
 // child process to signal their host's death, so nothing else can retire a dead
@@ -13982,7 +13887,12 @@ ipcMain.handle('hermes:backend:recycle', async (_event, profile) => {
 
   return { ok: true }
 })
-ipcMain.handle('hermes:bootstrap:reset', async () => {
+ipcMain.handle('hermes:bootstrap:reset', async event => {
+  await resetWindowGatewayTunnel({
+    registry: readDesktopConnectionsRegistry(), config: readDesktopConnectionConfig(),
+    windowRoute: windowConnectionRoutes.get(event.sender.id), primaryProfile: primaryProfileKey(),
+    env: { token: process.env.HERMES_DESKTOP_REMOTE_TOKEN, url: process.env.HERMES_DESKTOP_REMOTE_URL }
+  }, gatewaySshTunnels)
   // Renderer's "Reload and retry" path. Clear the latched failure and
   // reset connection state so the next startHermes() call restarts the
   // full backend flow (including a fresh runBootstrap pass).
@@ -14216,7 +14126,19 @@ ipcMain.handle('hermes:ssh-config:resolve', async (_event, host) => {
     })
   })
 })
-ipcMain.handle('hermes:connection-config:test', async (_event, payload) => testDesktopConnectionConfig(payload))
+ipcMain.handle('hermes:connection-config:test', async (event, payload, draft) => {
+  const tunnel = await gatewayTunnelForDraft(payload?.remoteUrl, draft, event.sender)
+
+  if (!tunnel) {return testDesktopConnectionConfig(payload)}
+  const status: any = await fetchConnectionStatus(tunnel.dialBaseUrl, 'oauth', null, {})
+  const ticket = await mintGatewayWsTicket(tunnel.dialBaseUrl)
+  const result = await probeGatewayWebSocket(buildGatewayWsUrlWithTicket(tunnel.dialBaseUrl, ticket), { WebSocketImpl: globalThis.WebSocket, headers: {} })
+  gatewaySshTunnels.assertCurrent(tunnel)
+
+  if (!result.ok) {throw new Error('SSH Gateway WebSocket test failed: ' + result.reason)}
+
+  return { ok: true, reachable: true, baseUrl: tunnel.canonicalBaseUrl, version: status?.version || null }
+})
 
 // ── Opt-in keychain encryption for stored secrets ───────────────────────────
 // get returns the current policy without touching safeStorage; set flips it
@@ -14247,6 +14169,8 @@ ipcMain.handle('hermes:connections:remove', async (_event, id) => {
     writeRegistry: writeDesktopConnectionsRegistry
   })
 
+  await gatewaySshTunnels.invalidate(key)
+  terminalIpc.disposeTerminalSessionsForConnection(key)
   // Tear down owned backends/tunnels and evict per-id metadata: label slugs
   // are recycled, so cached profiles must not follow a re-added connection.
   await stopRegistryConnectionBackends(key)
@@ -14324,7 +14248,8 @@ ipcMain.handle('hermes:connections:test', async (_event, id) => {
     token = local.token
     authMode = normAuthMode(local.authMode)
   } else {
-    baseUrl = normalizeRemoteBaseUrl(entry.url)
+    const tunnel = entry.sshTunnel || entry.sshTunnelError ? await resolveGatewayTunnelSource(entry) : undefined
+    baseUrl = tunnel?.dialBaseUrl || normalizeRemoteBaseUrl(entry.url)
     authMode = normAuthMode(entry.authMode)
     testHeaders = decryptRemoteHeaders(entry.headers)
 
@@ -14843,19 +14768,21 @@ async function fetchJsonForBackend(
   })
 }
 
-ipcMain.handle('hermes:connection-config:probe', async (_event, rawUrl) => probeRemoteAuthMode(rawUrl, fetchPublicJson))
+ipcMain.handle('hermes:connection-config:probe', async (event, rawUrl, rawOpts) => {
+  const tunnel = await gatewayTunnelForDraft(rawUrl, rawOpts, event.sender)
+
+  return probeRemoteAuthMode(tunnel?.dialBaseUrl || rawUrl, fetchPublicJson)
+})
+ipcMain.handle('hermes:connection-config:cancel-draft', async event => {
+  tunnelDraftSources.delete(event.sender.id)
+  await gatewaySshTunnels.invalidate(('draft:' + event.sender.id))
+})
 ipcMain.handle('hermes:connection-config:oauth-login', async (_event, rawUrl, rawOpts) => {
-  // Capability-gated login (RFC 8252). Probe the gateway's public /api/status
-  // for supported auth_flows and /api/auth/providers for provider capabilities:
-  //   - all providers support password → always use the embedded login window
-  //     (password providers require the dashboard login form; native PKCE
-  //     can never complete for that provider shape)
-  //   - advertises "native_pkce" AND at least one non-password provider →
-  //     run the system-browser + loopback + PKCE flow
-  //   - older gateway with no provider metadata → fall back to the auth_flows
-  //     check (existing compatibility)
-  //   - a failed native login reports the error rather than auto-falling back
-  //     to the embedded flow — one sign-in action opens at most one window.
+  const tunnel = await gatewayTunnelForDraft(rawUrl, rawOpts, _event.sender)
+
+  if (tunnel) {return signInTunnelGateway(tunnel, rawOpts?.connectionId || '')}
+  // SSH Gateway sign-in above uses its verified native password broker.
+  // Direct connections retain their existing native/embedded compatibility policy.
   const baseUrl = normalizeRemoteBaseUrl(rawUrl)
   // Order login attempts without interrupting rotation of the existing session.
   const authIsCurrent: () => boolean = nativeAccessTokenCoordinator.beginLogin(baseUrl)
@@ -16640,6 +16567,10 @@ registerMachineUiPreferences(HERMES_HOME)
 // Another writer (the Webapp) changed the shared list: same teardown as a local save/remove.
 gatewayConnectionsStore.watch({
   onRegistry: (changes, { after, before }) => {
+    void invalidateExternalGatewayRuntime(changes, gatewaySshTunnels, connectionId => {
+      terminalIpc.disposeTerminalSessionsForConnection(connectionId)
+    })
+
     if (changes.some(change => change.reason === 'removed')) {
       forgetDesktopGlobalRouteIfRemoved()
     }
@@ -16697,7 +16628,7 @@ const terminalIpc = registerTerminalIpc({
   isWindows: IS_WINDOWS,
   findOnPath,
   rememberLog,
-  activeSshTerminalTarget,
+  activeSshTerminalTarget: terminalTargetForWindow,
   sshBinary: desktopSshBinary,
   ensureBackend: webContentsId => ensureTerminalBackend(webContentsId),
   getSshConnectionState: scope => sshConnections.get(scope),
@@ -17764,6 +17695,7 @@ app.on('before-quit', event => {
     sshConnections.size > 0 || sshBootstrapCoordinator.promises().length > 0 || sshTeardowns.hasPending()
 
   const teardownTasks: QuitTeardownTask[] = [
+    { run: () => gatewaySshTunnels.closeAll(), waitForCompletion: true },
     { run: (): Promise<void> => backendShutdown.run(), waitForCompletion: backendNeedsWait }
   ]
 

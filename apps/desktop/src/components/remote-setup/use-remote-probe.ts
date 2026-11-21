@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 
-import type { DesktopConnectionProbeResult } from '@/global'
+import type { DesktopConnectionProbeResult, DesktopOauthLoginOptions } from '@/global'
 
 type ProbeStatus = 'idle' | 'probing' | 'done' | 'error'
 
 interface RemoteProbeOptions {
+  identity?: DesktopOauthLoginOptions
   enabled: boolean
   url: string
   revision: number
@@ -20,12 +21,20 @@ interface RemoteProbe {
   acceptProbe: (result: DesktopConnectionProbeResult) => void
 }
 
-export function useRemoteProbe({ enabled, url, revision, onResult, onReset }: RemoteProbeOptions): RemoteProbe {
+export function useRemoteProbe({
+  enabled,
+  url,
+  revision,
+  onResult,
+  onReset,
+  identity
+}: RemoteProbeOptions): RemoteProbe {
+  const identityKey = JSON.stringify(identity)
   const [probe, setProbe] = useState<DesktopConnectionProbeResult | null>(null)
   const [probeStatus, setProbeStatus] = useState<ProbeStatus>('idle')
   const targetSeq = useRef<number>(0)
-  const callbacks = useRef({ onResult, onReset })
-  callbacks.current = { onResult, onReset }
+  const callbacks = useRef({ onResult, onReset, identity })
+  callbacks.current = { onResult, onReset, identity }
 
   const invalidateProbe = (): void => {
     targetSeq.current += 1
@@ -45,12 +54,17 @@ export function useRemoteProbe({ enabled, url, revision, onResult, onReset }: Re
   // The debounce depends on the target, not on host render callbacks.
   // eslint-disable-next-line no-restricted-syntax -- request generations, not a reactive value mirror
   useEffect(() => {
+    const identity = callbacks.current.identity
     const seq = ++targetSeq.current
     let timer: number | undefined
 
     const cancel = (): void => {
       targetSeq.current += 1
       window.clearTimeout(timer)
+
+      if (identity?.sshTunnel) {
+        void window.hermesDesktop?.cancelConnectionDraft?.()
+      }
     }
 
     setProbe(null)
@@ -63,8 +77,11 @@ export function useRemoteProbe({ enabled, url, revision, onResult, onReset }: Re
 
     setProbeStatus('probing')
     timer = window.setTimeout(() => {
-      void window.hermesDesktop
-        .probeConnectionConfig(url)
+      void (
+        identity
+          ? window.hermesDesktop.probeConnectionConfig(url, identity)
+          : window.hermesDesktop.probeConnectionConfig(url)
+      )
         .then(result => {
           if (seq === targetSeq.current) {
             acceptProbeRef.current(result)
@@ -78,7 +95,7 @@ export function useRemoteProbe({ enabled, url, revision, onResult, onReset }: Re
     }, 500)
 
     return cancel
-  }, [enabled, revision, url])
+  }, [enabled, revision, url, identityKey])
 
   return { probe, probeStatus, targetSeq, invalidateProbe, acceptProbe }
 }

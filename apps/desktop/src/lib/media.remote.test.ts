@@ -56,6 +56,55 @@ describe('mediaExternalUrl', () => {
     }
   })
 
+  describe.each(['electron', 'browser'])('SSH Gateway on the %s host', host => {
+    beforeEach(() => {
+      document.documentElement.dataset.hermesDesktopHost = host
+      $connection.set({
+        baseUrl: 'http://127.0.0.1:9119',
+        canonicalBaseUrl: 'https://gateway.example',
+        mode: 'remote',
+        sshTunnelGeneration: 'generation-1',
+        token: 'fixture-token'
+      } as never)
+    })
+
+    afterEach(() => {
+      document.documentElement.removeAttribute('data-hermes-desktop-host')
+    })
+
+    it.each([
+      'data:image/png;base64,AAAA',
+      'DATA:image/png;base64,AAAA',
+      'blob:https://gateway.example/3f1c',
+      'BlOb:https://app.example/3f1c'
+    ])('passes through the inline URL %s without adding gateway credentials', url => {
+      expect(mediaExternalUrl(url)).toBe(url)
+    })
+
+    it.each(['/tmp/a.png', 'file:///tmp/a.png', 'out/a.png', 'C:\\renders\\a.png'])(
+      'still requires a ticketed save for gateway file %s',
+      path => {
+        expect(() => mediaExternalUrl(path)).toThrow('Save this remote file through Hermes to open it locally.')
+      }
+    )
+
+    it.each(['stream', 'download'])('does not bypass SSH for a canonical gateway %s URL', route => {
+      expect(() => mediaExternalUrl(`https://gateway.example/api/files/${route}?path=%2Ftmp%2Fa.png`)).toThrow(
+        'Save this remote file through Hermes to open it locally.'
+      )
+    })
+
+    it('still refuses canonical backend URLs that are not downloadable file paths', () => {
+      expect(() => mediaExternalUrl('https://gateway.example/api/media/proxy?url=https://cdn.example/a.png')).toThrow(
+        'This backend media URL cannot be opened outside the SSH Gateway transport.'
+      )
+    })
+
+    it.each(['http://cdn.example/a.png', 'https://cdn.example/a.png'])('preserves unrelated web URL %s', url => {
+      expect(mediaExternalUrl(url)).toBe(url)
+    })
+  })
+
   it('keeps file:// form in local mode', () => {
     $connection.set({ mode: 'local' } as never)
     expect(mediaExternalUrl('/tmp/a.png')).toBe('file:///tmp/a.png')

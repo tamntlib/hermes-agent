@@ -53,6 +53,7 @@ const DONE_HTML =
   '<script>setTimeout(()=>window.close(),800)</script>'
 
 export interface NativeLoginDeps {
+  signal?: AbortSignal
   /** Open a URL in the user's system browser (shell.openExternal). */
   openExternal: (url: string) => Promise<void>
   /** POST JSON and resolve the parsed body (electron.net-backed in prod). */
@@ -126,7 +127,11 @@ export async function runNativeLogin(
       }
     })
 
+    const aborted = () => fail(new Error('SSH Gateway changed during sign-in. Start sign-in again.'))
+
     const cleanup = () => {
+      deps.signal?.removeEventListener('abort', aborted)
+
       if (timer) {
         clearTimeout(timer)
       }
@@ -165,6 +170,14 @@ export async function runNativeLogin(
           cleanup()
           reject(error instanceof Error ? error : new Error(String(error)))
         })
+    }
+
+    deps.signal?.addEventListener('abort', aborted, { once: true })
+
+    if (deps.signal?.aborted) {
+      aborted()
+
+      return
     }
 
     server.on('error', err => fail(err instanceof Error ? err : new Error(String(err))))

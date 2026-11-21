@@ -7,6 +7,7 @@ import { desktopFsCacheKey, isReadFileErrorResult, readDesktopFileDataUrl } from
 import { hostHas } from '@/lib/host-capabilities'
 import { LruCache } from '@/lib/lru-cache'
 import { capitalize } from '@/lib/text'
+import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { notify, notifyError } from '@/store/notifications'
 import { $connection } from '@/store/session'
 
@@ -141,6 +142,8 @@ export function isFileMediaPath(path: string): boolean {
 }
 
 export async function resolveMediaDisplaySrc(path: string, owner?: OwnerScope): Promise<string> {
+  path = tunnelMediaPath(path, owner)
+
   if (isInlineMediaSrc(path) || !isFileMediaPath(path)) {
     return path
   }
@@ -266,10 +269,44 @@ export function rememberMediaImageFailure(key: string): void {
   rememberMediaImage(key, 'broken')
 }
 
+function tunnelMediaPath(input: string, owner?: OwnerScope): string {
+  const current = $connection.get()
+
+  const saved =
+    owner?.connectionId && owner.connectionId !== current?.connectionId
+      ? $connectionsRegistry.get()?.connections.find(source => source.id === owner.connectionId)
+      : undefined
+
+  const connection = saved
+    ? {
+        sshTunnelGeneration: saved.sshTunnel || saved.sshTunnelError ? 'configured' : undefined,
+        canonicalBaseUrl: saved.url
+      }
+    : current
+
+  if (!connection?.sshTunnelGeneration || !connection.canonicalBaseUrl || !/^https?:/i.test(input)) {
+    return input
+  }
+
+  const url = new URL(input)
+
+  if (url.origin !== new URL(connection.canonicalBaseUrl).origin) {
+    return input
+  }
+
+  if (['/api/files/stream', '/api/files/download'].includes(url.pathname) && url.searchParams.get('path')) {
+    return url.searchParams.get('path')!
+  }
+
+  throw new Error('This backend media URL cannot be opened outside the SSH Gateway transport.')
+}
+
 // Audio/video need a seekable source instead of a whole-file data URL. Keep
 // remote URLs untouched. The Webapp supplies an authenticated HTTP source;
 // Electron's media protocol reads local files or proxies remote gateways.
 export async function resolveMediaPlaybackSrc(path: string, owner?: OwnerScope, sessionId?: string): Promise<string> {
+  path = tunnelMediaPath(path, owner)
+
   if (isInlineMediaSrc(path)) {
     return path
   }
@@ -306,7 +343,15 @@ export async function resolveMediaPlaybackSrc(path: string, owner?: OwnerScope, 
 // (downloadGatewayMediaFile) instead. A data: or blob: URL is no gateway
 // path: it stays as it is, on every host.
 export function mediaExternalUrl(path: string): string {
-  if (/^(?:https?|data|blob):/i.test(path)) {
+  if (/^(?:data|blob):/i.test(path)) {
+    return path
+  }
+
+  if ($connection.get()?.sshTunnelGeneration && !/^https?:/i.test(tunnelMediaPath(path))) {
+    throw new Error('Save this remote file through Hermes to open it locally.')
+  }
+
+  if (/^https?:/i.test(path)) {
     return path
   }
 

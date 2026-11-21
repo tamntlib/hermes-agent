@@ -41,6 +41,9 @@ interface EditorState {
   label: string
   host: string
   keyPath: string
+  sshTunnelEnabled: boolean
+  sshTunnelHost: string
+  sshTunnelKeyPath: string
   remoteHermesPath: string
   // ssh remote profile, hydrated on edit so the duplicate key matches the
   // main-process one (user@host:port + profile); the editor doesn't expose it.
@@ -65,6 +68,11 @@ function editorFromConnection(conn: DesktopRegistryConnection): EditorState {
     // would silently resurrect the old values.
     host: conn.host ? `${conn.user ? `${conn.user}@` : ''}${conn.host}${conn.port ? `:${conn.port}` : ''}` : '',
     keyPath: conn.keyPath || '',
+    sshTunnelEnabled: Boolean(conn.sshTunnel || conn.sshTunnelError),
+    sshTunnelHost: conn.sshTunnel
+      ? `${conn.sshTunnel.user ? `${conn.sshTunnel.user}@` : ''}${conn.sshTunnel.host.includes(':') ? `[${conn.sshTunnel.host}]` : conn.sshTunnel.host}${conn.sshTunnel.port ? `:${conn.sshTunnel.port}` : ''}`
+      : '',
+    sshTunnelKeyPath: conn.sshTunnel?.keyPath || '',
     remoteHermesPath: conn.remoteHermesPath || '',
     remoteProfile: conn.remoteProfile || '',
     headers: (conn.headerNames || []).map(name => ({ name, stored: true, value: '' }))
@@ -78,6 +86,9 @@ function emptyEditor(kind: DesktopConnectionKind): EditorState {
     label: '',
     host: '',
     keyPath: '',
+    sshTunnelEnabled: false,
+    sshTunnelHost: '',
+    sshTunnelKeyPath: '',
     remoteHermesPath: '',
     remoteProfile: '',
     headers: []
@@ -230,6 +241,189 @@ function useRegistryChanges(
   )
 }
 
+function buildOauthLoginIdentity(
+  editor: EditorState | null,
+  registry: DesktopConnectionsRegistry | null,
+  authMode: 'oauth' | 'token'
+) {
+  const hasTunnelIntent =
+    editor?.kind === 'remote' &&
+    (editor.sshTunnelEnabled ||
+      registry?.connections.some(
+        connection => connection.id === editor.id && (connection.sshTunnel || connection.sshTunnelError)
+      ))
+
+  return {
+    connectionId: editor?.id ?? null,
+    label: editor?.label ?? '',
+    kind: editor?.kind,
+    authMode: editor?.kind === 'cloud' ? ('oauth' as const) : authMode,
+    ...(hasTunnelIntent
+      ? {
+          sshTunnel: editor.sshTunnelEnabled
+            ? {
+                host: editor.sshTunnelHost,
+                keyPath: editor.sshTunnelKeyPath
+              }
+            : null
+        }
+      : {})
+  }
+}
+
+function buildSavePayload(
+  editor: EditorState,
+  remoteCredentials: ReturnType<typeof useRemoteSetup>['credentials'],
+  remotePayload: ReturnType<typeof useRemoteSetup>['payload'],
+  allowPlainTextToken: boolean
+): DesktopRegistryConnectionInput {
+  const payload: DesktopRegistryConnectionInput = {
+    kind: editor.kind,
+    label: editor.label
+  }
+
+  if (editor.id) {
+    payload.id = editor.id
+  }
+
+  if (editor.kind === 'remote' || editor.kind === 'cloud') {
+    if (editor.kind === 'remote') {
+      payload.sshTunnel = editor.sshTunnelEnabled
+        ? {
+            host: editor.sshTunnelHost,
+            keyPath: editor.sshTunnelKeyPath
+          }
+        : null
+    }
+
+    payload.url = remotePayload.remoteUrl
+    payload.authMode = editor.kind === 'cloud' ? 'oauth' : remoteCredentials.authMode
+
+    if (editor.kind === 'remote' && remotePayload.remoteToken) {
+      payload.token = remotePayload.remoteToken
+    }
+
+    if (allowPlainTextToken) {
+      payload.allowPlainTextToken = true
+    }
+
+    // Authoritative header map: typed value → new secret; empty value on
+    // a stored row → null (keep saved secret); a removed row is simply
+    // absent, which clears it server-side.
+    const headerEntries = editor.headers
+      .map(row => ({ name: row.name.trim(), stored: row.stored, value: row.value.trim() }))
+      .filter(row => row.name)
+
+    if (headerEntries.length > 0 || editor.headers.length === 0) {
+      payload.headers = Object.fromEntries(
+        headerEntries.map(row => [row.name, row.value ? row.value : row.stored ? null : ''])
+      )
+    }
+  } else if (editor.kind === 'ssh') {
+    // The composite host string (user@host:port) is the single source
+    // of truth — never send separate user/port (see editorFromConnection).
+    payload.host = editor.host
+    payload.keyPath = editor.keyPath || undefined
+    payload.remoteHermesPath = editor.remoteHermesPath.trim()
+  }
+
+  return payload
+}
+
+interface SshTunnelFieldsProps {
+  editor: EditorState
+  labels: ReturnType<typeof useI18n>['t']['settings']['connections']
+  onChange: (next: EditorState) => void
+}
+
+function SshTunnelFields({ editor, labels, onChange }: SshTunnelFieldsProps) {
+  if (editor.kind !== 'remote') {
+    return null
+  }
+
+  return (
+    <>
+      <ToggleRow
+        checked={editor.sshTunnelEnabled}
+        description={labels.sshTunnelDesc}
+        label={labels.sshTunnelTitle}
+        onChange={enabled => onChange({ ...editor, sshTunnelEnabled: enabled })}
+      />
+      {editor.sshTunnelEnabled && (
+        <>
+          <ListRow
+            action={
+              <Input
+                onChange={e => onChange({ ...editor, sshTunnelHost: e.target.value })}
+                placeholder="user@host:22"
+                value={editor.sshTunnelHost}
+              />
+            }
+            title={labels.sshTunnelHost}
+          />
+          <ListRow
+            action={
+              <Input
+                onChange={e => onChange({ ...editor, sshTunnelKeyPath: e.target.value })}
+                value={editor.sshTunnelKeyPath}
+              />
+            }
+            title={labels.sshTunnelKey}
+          />
+          <p className="text-xs text-muted-foreground">{labels.sshTunnelDestination}</p>
+        </>
+      )}
+    </>
+  )
+}
+
+interface ConnectionsConfirmDialogsProps {
+  gatewayLabels: ReturnType<typeof useI18n>['t']['settings']['gateway']
+  labels: ReturnType<typeof useI18n>['t']['settings']['connections']
+  onClosePlainText: () => void
+  onCloseRemove: () => void
+  onConfirmPlainText: () => void
+  onConfirmRemove: () => void
+  plainTextConfirm: boolean
+  removeTarget: DesktopRegistryConnection | null
+}
+
+function ConnectionsConfirmDialogs({
+  gatewayLabels,
+  labels,
+  onClosePlainText,
+  onCloseRemove,
+  onConfirmPlainText,
+  onConfirmRemove,
+  plainTextConfirm,
+  removeTarget
+}: ConnectionsConfirmDialogsProps) {
+  return (
+    <>
+      <ConfirmDialog
+        confirmLabel={labels.removeConnection}
+        description={removeTarget ? labels.removeConfirmDesc(removeTarget.label) : ''}
+        destructive
+        onClose={onCloseRemove}
+        onConfirm={onConfirmRemove}
+        open={Boolean(removeTarget)}
+        title={labels.removeConfirmTitle}
+      />
+
+      {/* Keyring-less opt-in: same consent flow as the connection-mode form. */}
+      <ConfirmDialog
+        confirmLabel={gatewayLabels.plainTextConfirmAction}
+        description={gatewayLabels.plainTextConfirmDesc}
+        destructive
+        onClose={onClosePlainText}
+        onConfirm={onConfirmPlainText}
+        open={plainTextConfirm}
+        title={gatewayLabels.plainTextConfirmTitle}
+      />
+    </>
+  )
+}
+
 /**
  * The connections registry section of Settings → Gateways: manage the named
  * agent sources (local runtime + any number of remote gateways / Hermes Cloud
@@ -274,12 +468,7 @@ export function ConnectionsRegistrySection() {
     // a cookie-auth remote draft gets its own; cloud and token drafts share
     // the legacy jar, exactly what they resolve to after the save. Pin the
     // settled id into the draft so Save reuses it.
-    oauthLoginIdentity: () => ({
-      connectionId: editor?.id ?? null,
-      label: editor?.label ?? '',
-      kind: editor?.kind,
-      authMode: editor?.kind === 'cloud' ? 'oauth' : remoteAuthModeRef.current
-    }),
+    oauthLoginIdentity: () => buildOauthLoginIdentity(editor, registry, remoteAuthModeRef.current),
     onOAuthLoginSettled: settledId => {
       setEditor(prev => (prev && !prev.id ? { ...prev, id: settledId } : prev))
     }
@@ -319,6 +508,7 @@ export function ConnectionsRegistrySection() {
   useRegistryChanges(bridge, publishRegistry)
 
   const openEditor = (next: EditorState | null, saved?: DesktopRegistryConnection): void => {
+    void window.hermesDesktop?.cancelConnectionDraft?.()
     setDupeError(null)
     remote.reset({
       url: saved?.url || '',
@@ -356,49 +546,11 @@ export function ConnectionsRegistrySection() {
       setSaving(true)
 
       try {
-        const payload: DesktopRegistryConnectionInput = {
-          kind: editor.kind,
-          label: editor.label
-        }
-
-        if (editor.id) {
-          payload.id = editor.id
-        }
-
-        if (editor.kind === 'remote' || editor.kind === 'cloud') {
-          payload.url = remote.payload.remoteUrl
-          payload.authMode = editor.kind === 'cloud' ? 'oauth' : remote.credentials.authMode
-
-          if (editor.kind === 'remote' && remote.payload.remoteToken) {
-            payload.token = remote.payload.remoteToken
-          }
-
-          if (allowPlainTextToken) {
-            payload.allowPlainTextToken = true
-          }
-
-          // Authoritative header map: typed value → new secret; empty value on
-          // a stored row → null (keep saved secret); a removed row is simply
-          // absent, which clears it server-side.
-          const headerEntries = editor.headers
-            .map(row => ({ name: row.name.trim(), stored: row.stored, value: row.value.trim() }))
-            .filter(row => row.name)
-
-          if (headerEntries.length > 0 || editor.headers.length === 0) {
-            payload.headers = Object.fromEntries(
-              headerEntries.map(row => [row.name, row.value ? row.value : row.stored ? null : ''])
-            )
-          }
-        } else if (editor.kind === 'ssh') {
-          // The composite host string (user@host:port) is the single source
-          // of truth — never send separate user/port (see editorFromConnection).
-          payload.host = editor.host
-          payload.keyPath = editor.keyPath || undefined
-          payload.remoteHermesPath = editor.remoteHermesPath.trim()
-        }
+        const payload = buildSavePayload(editor, remote.credentials, remote.payload, allowPlainTextToken)
 
         const result = await bridge.save(payload)
         publishRegistry(result.registry)
+        void window.hermesDesktop?.cancelConnectionDraft?.()
         setEditor(null)
         setPlainTextConfirm(false)
       } catch (err) {
@@ -851,6 +1003,8 @@ export function ConnectionsRegistrySection() {
             </div>
           )}
 
+          <SshTunnelFields editor={editor} labels={s} onChange={setEditor} />
+
           {editor.kind === 'ssh' && (
             <>
               <ListRow
@@ -943,25 +1097,15 @@ export function ConnectionsRegistrySection() {
         </div>
       )}
 
-      <ConfirmDialog
-        confirmLabel={s.removeConnection}
-        description={removeTarget ? s.removeConfirmDesc(removeTarget.label) : ''}
-        destructive
-        onClose={() => setRemoveTarget(null)}
-        onConfirm={() => remove()}
-        open={Boolean(removeTarget)}
-        title={s.removeConfirmTitle}
-      />
-
-      {/* Keyring-less opt-in: same consent flow as the connection-mode form. */}
-      <ConfirmDialog
-        confirmLabel={t.settings.gateway.plainTextConfirmAction}
-        description={t.settings.gateway.plainTextConfirmDesc}
-        destructive
-        onClose={() => setPlainTextConfirm(false)}
-        onConfirm={() => save(true)}
-        open={plainTextConfirm}
-        title={t.settings.gateway.plainTextConfirmTitle}
+      <ConnectionsConfirmDialogs
+        gatewayLabels={t.settings.gateway}
+        labels={s}
+        onClosePlainText={() => setPlainTextConfirm(false)}
+        onCloseRemove={() => setRemoveTarget(null)}
+        onConfirmPlainText={() => save(true)}
+        onConfirmRemove={() => remove()}
+        plainTextConfirm={plainTextConfirm}
+        removeTarget={removeTarget}
       />
     </div>
   )

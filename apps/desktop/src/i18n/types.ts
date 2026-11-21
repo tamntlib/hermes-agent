@@ -1072,6 +1072,11 @@ export interface Translations extends NoticeTranslations {
     }
     // v2 multi-connection registry: Settings → Connections.
     connections: {
+      sshTunnelTitle: string
+      sshTunnelDesc: string
+      sshTunnelHost: string
+      sshTunnelKey: string
+      sshTunnelDestination: string
       title: string
       intro: string
       stagedNote: string

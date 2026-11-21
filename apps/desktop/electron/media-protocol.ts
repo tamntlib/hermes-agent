@@ -36,6 +36,8 @@ export interface MediaRemoteScope {
 }
 
 export interface MediaRemoteConnection {
+  canonicalBaseUrl?: string
+  sshTunnelGeneration?: string
   authMode?: 'oauth' | 'token'
   baseUrl: string
   headers?: Record<string, string>
@@ -231,10 +233,20 @@ export function createMediaProtocolHandler(dependencies: MediaProtocolDependenci
       if (connection.authMode === 'oauth') {
         return await requestWithOauthFallback(connection.baseUrl, {
           ensureNativeAccessToken: dependencies.ensureRemoteBearer,
+          nativeOnly: Boolean(connection.sshTunnelGeneration),
           requestWithBearer: bearer => {
             headers.set('authorization', `Bearer ${bearer}`)
 
-            return dependencies.fetchRemote(endpoint, headers, method)
+            const response = dependencies.fetchRemote(endpoint, headers, method)
+
+            return response.then(result => {
+              if (connection.sshTunnelGeneration && result.status >= 300 && result.status < 400) {
+                void result.body?.cancel()
+                throw new Error('SSH Gateway media redirect refused.')
+              }
+
+              return result
+            })
           },
           requestWithCookie: async () => {
             const response = await dependencies.fetchRemoteWithCookies(endpoint, headers, method)
