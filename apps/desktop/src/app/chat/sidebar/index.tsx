@@ -24,16 +24,16 @@ import {
 } from '@/components/ui/sidebar'
 import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
 import { useContributions } from '@/contrib/react/use-contributions'
-import { type SessionInfo, type SessionSearchResult } from '@/hermes'
+import { type SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { comboTokens } from '@/lib/keybinds/combo'
-import { sessionMatchesSearch } from '@/lib/session-search'
 import { normalizeSessionSource, sessionSourceLabel } from '@/lib/session-source'
 import { cn } from '@/lib/utils'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $activeConnectionId } from '@/store/connections'
 import { $cronJobs } from '@/store/cron'
 import { recordAction } from '@/store/desktop-metrics'
+import { $primaryGatewayRoute } from '@/store/gateway-primary-route'
 import { $interfaceMode, $showsAdvancedChrome, shownInMode } from '@/store/interface-mode'
 import { $bindings } from '@/store/keybinds'
 import {
@@ -114,6 +114,7 @@ import {
   sessionPrKey
 } from '@/store/pull-requests'
 import { openRouteTile } from '@/store/route-tiles'
+import { $connection } from '@/store/session'
 import {
   $cronSessions,
   $gatewayState,
@@ -158,7 +159,7 @@ import { SidebarFilterMenu } from './filter-menu'
 import { buildGatewaySessionGroups, scopeGatewaySessionGroups, useGatewaySessionGroups } from './gateway-group-model'
 import { SidebarLoadMoreRow } from './load-more-row'
 import { orderByIds, reconcileOrderIds, resolveManualSessionOrderIds, sameIds } from './order'
-import { filterSessionsByProfileScope } from './profile-scope'
+import { filterSessionsByProfileScope, sessionMatchesProfileScope, type SidebarConnectionScope } from './profile-scope'
 import { ProfileRail } from './profile-switcher'
 import { ProjectDialog } from './project-dialog'
 import { filterToSessionBearingProjects, resolveLiveProjectFilter } from './project-filter'
@@ -183,6 +184,7 @@ import {
   useRepoWorktreeMap
 } from './projects'
 import { WorktreeDialog } from './projects/worktree-dialog'
+import { mergeSearchResults } from './search-results'
 import {
   hasSessionArea,
   SidebarBlankState,
@@ -283,98 +285,6 @@ const HEADER_ACTION_BTN =
 const HEADER_NAV_BTN =
   'text-(--ui-text-tertiary) opacity-70 transition-opacity hover:bg-(--ui-control-hover-background) hover:text-foreground hover:opacity-100 focus-visible:opacity-100'
 
-// FTS results cover sessions that aren't in the loaded page; synthesize a
-// minimal SessionInfo so they render in the same row component (resume works
-// by id; the snippet stands in for the preview).
-
-// The backend's FTS layer wraps matched terms in literal '>>>' / '<<<'
-// highlight markers (sqlite snippet() delimiters — see persistence/sqlite/conversation/_store/search.py).
-// The sidebar renders the snippet as plain text, so the markers must be
-// stripped or a search for "foo" paints rows titled ">>>foo<<<".
-// Exported for tests.
-export function stripFtsMarkers(snippet: string): string {
-  return snippet.replaceAll('>>>', '').replaceAll('<<<', '')
-}
-
-// The backend already ships the real session title on every search hit
-// (web_routers/sessions.py add_lineage_result enriches each result via
-// get_session_rich_row). Map it onto the synthesized row so the sidebar
-// paints the actual name; the snippet stays as the preview. Untitled
-// sessions keep today's snippet fallback via sessionTitle().
-// Exported for tests.
-export function searchResultToSession(result: SessionSearchResult): SessionInfo {
-  const ts = result.session_started ?? Date.now() / 1000
-
-  return {
-    archived: result.archived ?? false,
-    cwd: null,
-    ended_at: null,
-    id: result.session_id,
-    _lineage_root_id: result.lineage_root ?? null,
-    input_tokens: 0,
-    is_active: false,
-    last_active: result.last_active ?? ts,
-    message_count: 0,
-    model: result.model ?? null,
-    output_tokens: 0,
-    preview: stripFtsMarkers(result.snippet ?? '').trim() || null,
-    source: result.source ?? null,
-    started_at: ts,
-    title: result.title?.trim() || null,
-    tool_call_count: 0
-  }
-}
-
-export function mergeSearchResults(
-  sortedSessions: readonly SessionInfo[],
-  query: string,
-  serverMatches: readonly SessionSearchResult[],
-  sessionByAnyId: ReadonlyMap<string, SessionInfo>,
-  searchPending: boolean
-): SessionInfo[] {
-  if (!query) {
-    return []
-  }
-
-  // While the request is in flight the client's own recency-ordered matches
-  // are all there is — instant feedback while typing, and no leftovers from
-  // whatever the previous query's request returned. Once the ranked server
-  // response lands, it decides the order: the backend runs direct id matches
-  // before FTS content hits, so pasting a session's exact id must keep that
-  // hit on top instead of letting newer quoting sessions bury it.
-  const out = new Map<string, SessionInfo>()
-
-  if (searchPending) {
-    for (const s of sortedSessions) {
-      if (sessionMatchesSearch(s, query)) {
-        out.set(s.id, s)
-      }
-    }
-
-    return [...out.values()]
-  }
-
-  for (const match of serverMatches) {
-    if (out.has(match.session_id)) {
-      continue
-    }
-
-    const loaded = sessionByAnyId.get(match.session_id)
-    out.set(match.session_id, loaded ?? searchResultToSession(match))
-  }
-
-  // Client-only matches that the server didn't return (e.g. cwd/git-branch
-  // fields the FTS index doesn't cover) still deserve a row — after the
-  // ranked hits, in recency order.
-  for (const s of sortedSessions) {
-    if (!out.has(s.id) && sessionMatchesSearch(s, query)) {
-      out.set(s.id, s)
-    }
-  }
-
-  return [...out.values()]
-}
-
 interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
   currentView: AppView
   onNavigate: (item: SidebarNavItem) => void
@@ -395,6 +305,113 @@ interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
   onNewSessionSplit: NewSessionSplitHandler
   onManageCronJob: (jobId: string) => void
   onTriggerCronJob: (jobId: string) => Promise<void>
+}
+
+function buildContributedNavItems(navContributions: ReturnType<typeof useContributions>): SidebarNavItem[] {
+  return navContributions.flatMap(c => {
+    const data = c.data as Partial<SidebarNavContribution> | undefined
+
+    if (!data?.path?.startsWith('/') || !data.label) {
+      return []
+    }
+
+    const codicon = data.codicon || 'plug'
+
+    return [
+      {
+        id: c.id,
+        label: data.label,
+        icon: (props: { className?: string }) => <Codicon name={codicon} {...props} />,
+        route: data.path,
+        tier: data.tier
+      }
+    ]
+  })
+}
+
+function useSidebarConnectionScope() {
+  const activeConnectionId = useStore($activeConnectionId)
+  const connection = useStore($connection)
+  const connectionsRegistry = useStore($connectionsRegistry)
+  const primaryGatewayRoute = useStore($primaryGatewayRoute)
+
+  const connectionScope = useMemo(
+    () => ({
+      connectionId: activeConnectionId || (connection?.mode === 'local' ? 'local' : undefined),
+      primaryConnectionId:
+        connectionsRegistry?.primary ||
+        primaryGatewayRoute?.connectionId ||
+        (primaryGatewayRoute?.mode === 'local' ? 'local' : undefined)
+    }),
+    [activeConnectionId, connection?.mode, connectionsRegistry?.primary, primaryGatewayRoute]
+  )
+
+  return { activeConnectionId, connectionScope, connectionsRegistry }
+}
+
+function useSidebarWindowShortcuts(
+  searchInputRef: React.RefObject<HTMLInputElement | null>,
+  setNewSessionKbdFlash: React.Dispatch<React.SetStateAction<boolean>>
+) {
+  // Hotkey (session.focusSearch) → focus the field once it's mounted.
+  useEffect(() => {
+    const onFocus = () => searchInputRef.current?.focus({ preventScroll: true })
+
+    window.addEventListener(SESSION_SEARCH_FOCUS_EVENT, onFocus)
+
+    return () => window.removeEventListener(SESSION_SEARCH_FOCUS_EVENT, onFocus)
+  }, [searchInputRef])
+
+  // Flash the ⌘N hint full-opacity (no transition) for the press, so hitting
+  // the shortcut visibly pings its affordance in the sidebar.
+  useEffect(() => {
+    let timeout: ReturnType<typeof setTimeout> | undefined
+
+    const onShortcut = () => {
+      setNewSessionKbdFlash(true)
+      clearTimeout(timeout)
+      timeout = setTimeout(() => setNewSessionKbdFlash(false), 140)
+    }
+
+    window.addEventListener('hermes:new-session-shortcut', onShortcut)
+
+    return () => {
+      window.removeEventListener('hermes:new-session-shortcut', onShortcut)
+      clearTimeout(timeout)
+    }
+  }, [setNewSessionKbdFlash])
+}
+
+function useSidebarScopedPools(
+  displayScope: string,
+  connectionScope: SidebarConnectionScope,
+  showArchived: boolean,
+  sessions: SessionInfo[],
+  archivedSessions: SessionInfo[],
+  cronSessions: SessionInfo[],
+  messagingSessions: SessionInfo[]
+) {
+  const matchesScope = useCallback(
+    (session: SessionInfo) => sessionMatchesProfileScope(session, displayScope, connectionScope),
+    [displayScope, connectionScope]
+  )
+
+  const scopedSessions = useMemo(
+    () => filterSessionsByProfileScope(showArchived ? archivedSessions : sessions, displayScope, connectionScope),
+    [sessions, archivedSessions, showArchived, displayScope, connectionScope]
+  )
+
+  const visibleCronSessions = useMemo(
+    () => filterSessionsByProfileScope(cronSessions, displayScope, connectionScope),
+    [cronSessions, displayScope, connectionScope]
+  )
+
+  const visibleMessagingSessions = useMemo(
+    () => filterSessionsByProfileScope(messagingSessions, displayScope, connectionScope),
+    [messagingSessions, displayScope, connectionScope]
+  )
+
+  return { matchesScope, scopedSessions, visibleCronSessions, visibleMessagingSessions }
 }
 
 export function ChatSidebar({
@@ -420,26 +437,7 @@ export function ChatSidebar({
   const navContributions = useContributions(SIDEBAR_NAV_AREA)
 
   const contributedNav = useMemo<SidebarNavItem[]>(
-    () =>
-      navContributions.flatMap(c => {
-        const data = c.data as Partial<SidebarNavContribution> | undefined
-
-        if (!data?.path?.startsWith('/') || !data.label) {
-          return []
-        }
-
-        const codicon = data.codicon || 'plug'
-
-        return [
-          {
-            id: c.id,
-            label: data.label,
-            icon: (props: { className?: string }) => <Codicon name={codicon} {...props} />,
-            route: data.path,
-            tier: data.tier
-          }
-        ]
-      }),
+    () => buildContributedNavItems(navContributions),
     [navContributions]
   )
 
@@ -499,7 +497,7 @@ export function ChatSidebar({
   const unreadCount = useStore($unreadFinishedSessionIds).length
   const profiles = useStore($profiles)
   const profileScope = useStore($profileScope)
-  const activeConnectionId = useStore($activeConnectionId)
+  const { activeConnectionId, connectionScope, connectionsRegistry } = useSidebarConnectionScope()
 
   // Toggle the persisted read-state watermark from a row menu. The row's own
   // `unread` prop mirrors what the dot paints; flip it and let the backend
@@ -518,6 +516,17 @@ export function ChatSidebar({
   // otherwise be stuck in the grouped view with no way out.
   const showAllProfiles = multiProfile && profileScope === ALL_PROFILES
   const [displayScope, messagingProfile, searchScope] = useSidebarDisplayScope(profileScope)
+
+  const { matchesScope, scopedSessions, visibleCronSessions, visibleMessagingSessions } = useSidebarScopedPools(
+    displayScope,
+    connectionScope,
+    showArchived,
+    sessions,
+    archivedSessions,
+    cronSessions,
+    messagingSessions
+  )
+
   const agentOrderIds = useStore($sidebarSessionOrderIds)
   const agentOrderManual = useStore($sidebarSessionOrderManual)
   const workspaceOrderIds = useStore($sidebarWorkspaceOrderIds)
@@ -555,33 +564,7 @@ export function ChatSidebar({
   const searchInputRef = useRef<HTMLInputElement>(null)
   const trimmedQuery = searchQuery.trim()
 
-  // Hotkey (session.focusSearch) → focus the field once it's mounted.
-  useEffect(() => {
-    const onFocus = () => searchInputRef.current?.focus({ preventScroll: true })
-
-    window.addEventListener(SESSION_SEARCH_FOCUS_EVENT, onFocus)
-
-    return () => window.removeEventListener(SESSION_SEARCH_FOCUS_EVENT, onFocus)
-  }, [])
-
-  // Flash the ⌘N hint full-opacity (no transition) for the press, so hitting
-  // the shortcut visibly pings its affordance in the sidebar.
-  useEffect(() => {
-    let timeout: ReturnType<typeof setTimeout> | undefined
-
-    const onShortcut = () => {
-      setNewSessionKbdFlash(true)
-      clearTimeout(timeout)
-      timeout = setTimeout(() => setNewSessionKbdFlash(false), 140)
-    }
-
-    window.addEventListener('hermes:new-session-shortcut', onShortcut)
-
-    return () => {
-      window.removeEventListener('hermes:new-session-shortcut', onShortcut)
-      clearTimeout(timeout)
-    }
-  }, [])
+  useSidebarWindowShortcuts(searchInputRef, setNewSessionKbdFlash)
 
   const activeSidebarSessionId = currentView === 'chat' ? selectedSessionId : null
   const profileRailVisible = useStore($profileRailVisible)
@@ -590,22 +573,6 @@ export function ChatSidebar({
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   )
-
-  // Profile scope = the "workspace switcher" context. Concrete scope shows only
-  // that profile's sessions (clean rows, no per-row tags); ALL fans every
-  // profile in. Grouped rendering stays gated on `showAllProfiles` (multi-profile
-  // + ALL) so a single-profile user is never stranded in a grouped view with no
-  // rail — but the *data* still has to fan in when the persisted scope is ALL
-  // (Grouping → Profile). Filtering that pool against the `__all__` sentinel
-  // matches nothing and empties recents + pins.
-  // Archived rows are excluded from the sessions query, so Archived is a view of
-  // its own set rather than a filter over this one — a flat list of archived
-  // rows, no project tree, no date or status dividers.
-  const scopedSessions = useMemo(() => {
-    const pool = showArchived ? archivedSessions : sessions
-
-    return filterSessionsByProfileScope(pool, displayScope)
-  }, [sessions, archivedSessions, showArchived, displayScope])
 
   // One predicate for the status/project filters, so the flat list and the
   // project lanes narrow by the same rule. A project lane holds rows the loaded
@@ -670,16 +637,6 @@ export function ChatSidebar({
     [visibleSessions]
   )
 
-  const visibleCronSessions = useMemo(
-    () => filterSessionsByProfileScope(cronSessions, displayScope),
-    [cronSessions, displayScope]
-  )
-
-  const visibleMessagingSessions = useMemo(
-    () => filterSessionsByProfileScope(messagingSessions, displayScope),
-    [messagingSessions, displayScope]
-  )
-
   // Index sessions by every id a pin might be stored under — recents, cron,
   // AND messaging, since all three can be pinned (see session-index.ts).
   const sessionByAnyId = useMemo(
@@ -696,10 +653,17 @@ export function ChatSidebar({
       resolvePinnedSessions(
         pinnedSessionIds,
         sessionByAnyId,
-        [...visibleSessions, ...cronSessions, ...messagingSessions],
+        [...visibleSessions, ...visibleCronSessions, ...visibleMessagingSessions],
         unconfirmedPinWrites
       ),
-    [pinnedSessionIds, sessionByAnyId, visibleSessions, cronSessions, messagingSessions, unconfirmedPinWrites]
+    [
+      pinnedSessionIds,
+      sessionByAnyId,
+      visibleSessions,
+      visibleCronSessions,
+      visibleMessagingSessions,
+      unconfirmedPinWrites
+    ]
   )
 
   // Every id a pin is reachable under: the raw stored ids, plus BOTH identities
@@ -737,15 +701,19 @@ export function ChatSidebar({
   // anything the active filters exclude, so filtering works the same whether
   // you're looking at the flat list or the lanes.
   const isHiddenFromProjects = useCallback(
-    (session: SessionInfo) => isPinnedSession(session) || (filtersNarrow && !sessionMatchesFilters(session)),
-    [isPinnedSession, filtersNarrow, sessionMatchesFilters]
+    (session: SessionInfo) =>
+      !matchesScope(session) || isPinnedSession(session) || (filtersNarrow && !sessionMatchesFilters(session)),
+    [matchesScope, isPinnedSession, filtersNarrow, sessionMatchesFilters]
   )
 
-  const { searchPending, serverMatches } = useServerSessionSearch(trimmedQuery, searchScope)
+  const { searchPending, serverMatches } = useServerSessionSearch(trimmedQuery, searchScope, displayScope)
 
   const searchResults = useMemo(
-    () => mergeSearchResults(sortedSessions, trimmedQuery, serverMatches, sessionByAnyId, searchPending),
-    [sortedSessions, trimmedQuery, serverMatches, sessionByAnyId, searchPending]
+    () =>
+      mergeSearchResults(sortedSessions, trimmedQuery, serverMatches, sessionByAnyId, searchPending).filter(
+        matchesScope
+      ),
+    [sortedSessions, trimmedQuery, serverMatches, sessionByAnyId, searchPending, matchesScope]
   )
 
   const unpinnedAgentSessions = useMemo(
@@ -1226,7 +1194,8 @@ export function ChatSidebar({
     const isHidden = (session: SessionInfo) => isHiddenFromProjects(session) || removedSessionIds.has(session.id)
     const counts: Record<string, number> = {}
 
-    for (const session of sessions) {
+    // A foreign retained row was never part of this backend's project total.
+    for (const session of scopedSessions) {
       const projectId = isHidden(session) ? sessionBucketId(session, projects, projectOwners) : null
 
       if (projectId) {
@@ -1235,7 +1204,7 @@ export function ChatSidebar({
     }
 
     return { isHidden, counts }
-  }, [sessions, projects, projectOwners, isHiddenFromProjects, removedSessionIds])
+  }, [scopedSessions, projects, projectOwners, isHiddenFromProjects, removedSessionIds])
 
   const onEnterProject = useCallback(
     (id: string) => {
@@ -1368,7 +1337,6 @@ export function ChatSidebar({
   // ([connectionId, profile]), so a platform's groups line up with recents.
   const ownerGrouped = profileScope === ALL_PROFILES && grouping === 'profile'
   const profileGroups = useGatewaySessionGroups(agentSessions, ownerGrouped, filtersNarrow)
-  const connectionsRegistry = useStore($connectionsRegistry)
   const profileColors = useStore($profileColors)
 
   // The flat Sessions list always shows ALL recent sessions; Projects is a

@@ -1,13 +1,23 @@
+import { backendScopeKey } from '@hermes/shared'
+import { useStore } from '@nanostores/react'
 import { useEffect, useState } from 'react'
 
-import { searchSessions, type SessionSearchResult } from '@/hermes'
+import { $apiRequestScope, ambientOwnerConnectionId } from '@/api/client'
+import { searchSessions } from '@/hermes'
 import { ALL_PROFILES, normalizeProfileKey } from '@/store/profile'
+import { $connection } from '@/store/session'
+
+import type { ScopedSessionSearchResult } from './search-results'
 
 const SEARCH_DEBOUNCE_MS = 200
 
 export interface ServerSessionSearch {
-  serverMatches: SessionSearchResult[]
+  serverMatches: ScopedSessionSearchResult[]
   searchPending: boolean
+}
+
+interface ScopedSearchState extends ServerSessionSearch {
+  key: string
 }
 
 /**
@@ -16,34 +26,54 @@ export interface ServerSessionSearch {
  * an unscoped request searches the primary backend's launch profile, whatever
  * profile is on screen. "All profiles" asks the primary as before.
  */
-export function useServerSessionSearch(query: string, profileScope: string): ServerSessionSearch {
-  const [serverMatches, setServerMatches] = useState<SessionSearchResult[]>([])
-  const [searchPending, setSearchPending] = useState(false)
+export function useServerSessionSearch(
+  query: string,
+  profileScope: string,
+  displayScope: string = profileScope
+): ServerSessionSearch {
+  const [search, setSearch] = useState<ScopedSearchState>({ key: '', serverMatches: [], searchPending: false })
+  const { connectionId } = useStore($apiRequestScope)
+  const connection = useStore($connection)
   const profile = profileScope === ALL_PROFILES ? null : normalizeProfileKey(profileScope)
+  const resultProfile = displayScope === ALL_PROFILES ? null : normalizeProfileKey(displayScope)
+
+  // Track both request authority and the displayed source across a gateway re-home.
+  const key = JSON.stringify([
+    query,
+    backendScopeKey(connectionId, profileScope),
+    displayScope,
+    connection?.connectionId ?? null,
+    connection?.mode ?? null
+  ])
 
   useEffect(() => {
-    if (!query) {
-      setServerMatches([])
-      setSearchPending(false)
+    setSearch({ key, serverMatches: [], searchPending: Boolean(query) })
 
+    if (!query) {
       return
     }
 
     let cancelled = false
 
-    setSearchPending(true)
-
     const id = window.setTimeout(() => {
+      const requestConnectionId = ambientOwnerConnectionId()
       void searchSessions(query, profile)
         .then(res => {
           if (!cancelled) {
-            setServerMatches(res.results)
+            setSearch({
+              key,
+              searchPending: false,
+              serverMatches: res.results.map(result => ({
+                ...result,
+                connection_id: requestConnectionId,
+                profile: resultProfile ?? undefined
+              }))
+            })
           }
         })
-        .catch(() => undefined)
-        .finally(() => {
+        .catch(() => {
           if (!cancelled) {
-            setSearchPending(false)
+            setSearch({ key, serverMatches: [], searchPending: false })
           }
         })
     }, SEARCH_DEBOUNCE_MS)
@@ -52,7 +82,8 @@ export function useServerSessionSearch(query: string, profileScope: string): Ser
       cancelled = true
       window.clearTimeout(id)
     }
-  }, [query, profile])
+  }, [query, profile, resultProfile, key])
 
-  return { searchPending, serverMatches }
+  // Effects run after render: never paint the previous scope's hits for even one frame.
+  return search.key === key ? search : { searchPending: Boolean(query), serverMatches: [] }
 }

@@ -3,11 +3,14 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { setApiRequestConnection } from '@/api/client'
 import { group, split } from '@/components/pane-shell/tree/model'
 import { $layoutTree, noteActiveTreeGroup } from '@/components/pane-shell/tree/store'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { registry } from '@/contrib/registry'
+import type { HermesConnection } from '@/global'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
+import { $primaryGatewayRoute } from '@/store/gateway-primary-route'
 import {
   $pinnedSessionIds,
   $sidebarMessagingOpenIds,
@@ -17,6 +20,7 @@ import {
   setSidebarAgentsGrouped,
   setSidebarGrouping
 } from '@/store/layout'
+import { $sidebarCronOpen, $sidebarShowAllSessions } from '@/store/layout'
 import { $activeGatewayProfile, $profiles, setShowAllProfiles } from '@/store/profile'
 import { $projectScope, ALL_PROJECTS } from '@/store/project-scope'
 import { $projectTree } from '@/store/projects'
@@ -30,7 +34,9 @@ import {
   $sessionsLoading,
   $workspaceCwdOwner
 } from '@/store/session'
+import { $connection, $cronSessions } from '@/store/session'
 import { $removedSessionIds } from '@/store/session-removal'
+import { $archivedSessions } from '@/store/sidebar-archive'
 import { SIDEBAR_NAV_PREFS_AREA } from '@/store/sidebar-nav'
 import { makeSessionInfo } from '@/test/session-info'
 
@@ -205,6 +211,310 @@ describe('ChatSidebar navigation activity', () => {
 
     act(() => dispose())
     expect(screen.getByRole('button', { name: 'Kanban' })).toBeTruthy()
+  })
+})
+
+describe('ChatSidebar connection-scoped presentation', () => {
+  const localConnection: HermesConnection = {
+    baseUrl: 'http://example.invalid',
+    wsUrl: 'ws://example.invalid',
+    token: '',
+    logs: [],
+    isFullscreen: false,
+    nativeOverlayWidth: 0,
+    windowButtonPosition: null,
+    mode: 'local',
+    connectionId: 'local'
+  }
+
+  const initialPrimary = $primaryGatewayRoute.get()
+  const initialConnection = $connection.get()
+
+  const local = makeSessionInfo({
+    id: 'scope-local',
+    title: 'Scoped local',
+    profile: 'default',
+    connection_id: 'local',
+    message_count: 2,
+    cwd: '/repos/scoped',
+    source: 'cli'
+  })
+
+  const remote = makeSessionInfo({
+    ...local,
+    id: 'scope-remote',
+    title: 'Scoped remote',
+    connection_id: 'vps',
+    is_active: true
+  })
+
+  beforeEach(() => {
+    $connection.set(localConnection)
+    $primaryGatewayRoute.set({ mode: 'local', connectionId: 'local' })
+    $connectionsRegistry.set({
+      version: 2,
+      primary: 'local',
+      secureTokenStorage: false,
+      connections: [
+        { id: 'local', kind: 'local', label: 'This device', tokenSet: false, tokenPreview: null },
+        { id: 'vps', kind: 'remote', label: 'VPS', url: 'http://example.invalid', tokenSet: false, tokenPreview: null }
+      ]
+    })
+    $activeGatewayProfile.set('default')
+    setShowAllProfiles(false)
+    setSidebarGrouping('date')
+    $sidebarShowAllSessions.set(false)
+    $sidebarShowArchived.set(false)
+    $sidebarStatusFilter.set([])
+    $sidebarProjectFilter.set([])
+    $pinnedSessionIds.set([])
+    $projectScope.set(ALL_PROJECTS)
+    $sessions.set([local, remote])
+    $sessionsLoading.set(false)
+    $sessionsLoadError.set(false)
+  })
+
+  afterEach(() => {
+    cleanup()
+    $connection.set(initialConnection)
+    $primaryGatewayRoute.set(initialPrimary)
+    $connectionsRegistry.set(null)
+    $sessions.set([])
+    $cronSessions.set([])
+    $messagingSessions.set([])
+    $archivedSessions.set([])
+    $projectTree.set([])
+    $pinnedSessionIds.set([])
+    $sidebarShowArchived.set(false)
+    $sidebarShowAllSessions.set(false)
+    $projectScope.set(ALL_PROJECTS)
+    setSidebarGrouping('date')
+    setShowAllProfiles(false)
+  })
+
+  it.each(['recents', 'pins', 'archived', 'cron', 'messaging', 'projects', 'project', 'show-all'])(
+    'hides retained remote work in local/default %s without discarding it',
+    view => {
+      if (view === 'pins') {
+        $sessions.set([
+          { ...local, pinned: true },
+          { ...remote, pinned: true }
+        ])
+        $pinnedSessionIds.set([local.id, remote.id])
+      }
+
+      if (view === 'archived') {
+        $archivedSessions.set([
+          { ...local, archived: true },
+          { ...remote, archived: true }
+        ])
+        $sidebarShowArchived.set(true)
+      }
+
+      if (view === 'cron' || view === 'messaging') {
+        $sessions.set([])
+
+        const rows = [
+          { ...local, source: view === 'cron' ? 'cron' : 'signal', pinned: view === 'cron' },
+          { ...remote, source: view === 'cron' ? 'cron' : 'signal', pinned: view === 'cron' }
+        ]
+
+        if (view === 'cron') {
+          $cronSessions.set(rows)
+          $sessions.set([{ ...local, id: 'anchor', title: 'Anchor' }])
+          $pinnedSessionIds.set([local.id, remote.id])
+          $sidebarCronOpen.set(true)
+        } else {
+          $messagingSessions.set(rows)
+          $sidebarMessagingOpenIds.set(['signal'])
+        }
+      }
+
+      if (['projects', 'project', 'show-all'].includes(view)) {
+        setSidebarAgentsGrouped(true)
+        $projectTree.set([
+          {
+            id: '/repos/scoped',
+            label: 'scoped',
+            path: '/repos/scoped',
+            repos: [
+              {
+                id: '/repos/scoped',
+                label: 'scoped',
+                path: '/repos/scoped',
+                sessionCount: 2,
+                groups: [
+                  {
+                    id: 'main',
+                    label: 'main',
+                    path: '/repos/scoped',
+                    sessions: [local, remote],
+                    isMain: true,
+                    isHome: true,
+                    isGit: false
+                  }
+                ]
+              }
+            ],
+            sessionCount: 2
+          }
+        ])
+
+        if (view === 'project') {
+          $projectScope.set('/repos/scoped')
+        }
+
+        if (view === 'show-all') {
+          $sidebarShowAllSessions.set(true)
+        }
+      }
+
+      const retained =
+        view === 'cron' ? $cronSessions.get() : view === 'messaging' ? $messagingSessions.get() : $sessions.get()
+
+      renderSidebar('/', 'chat')
+
+      expect(screen.queryAllByText('Scoped local').length).toBeGreaterThan(0)
+      expect(screen.queryByText('Scoped remote')).toBeNull()
+      expect(retained.find(row => row.id === remote.id)?.is_active).toBe(true)
+      expect(
+        view === 'cron' ? $cronSessions.get() : view === 'messaging' ? $messagingSessions.get() : $sessions.get()
+      ).toBe(retained)
+    }
+  )
+
+  it.each(['project', 'home'])('does not deduct foreign retained rows from the %s Show all count', bucket => {
+    setSidebarAgentsGrouped(true)
+    const cwd = bucket === 'home' ? null : '/repos/scoped'
+    const projectId = bucket === 'home' ? '__no_project__' : '/repos/scoped'
+
+    const preview = Array.from({ length: 3 }, (_, index) => ({
+      ...local,
+      id: `pagination-local-${index}`,
+      title: `Pagination local ${index}`,
+      cwd
+    }))
+
+    const foreign = [
+      { ...remote, id: 'pagination-remote-1', cwd },
+      { ...remote, id: 'pagination-remote-2', cwd },
+      { ...local, id: 'pagination-other-profile', profile: 'work', cwd }
+    ]
+
+    $sessions.set([...preview, ...foreign])
+    $projectTree.set([
+      {
+        id: projectId,
+        label: bucket,
+        path: cwd,
+        isAuto: bucket === 'project',
+        isNoProject: bucket === 'home',
+        sessionCount: 5,
+        previewSessions: preview,
+        repos: [
+          {
+            id: projectId,
+            label: bucket,
+            path: cwd,
+            sessionCount: 5,
+            groups: [{ id: 'pagination', label: bucket, path: cwd, sessions: [], isGit: false }]
+          }
+        ]
+      }
+    ])
+    const retained = $sessions.get()
+    renderSidebar('/', 'chat')
+
+    expect(screen.queryAllByText('Pagination local 1').length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: 'Show all 5 sessions' })).toBeTruthy()
+    expect($sessions.get()).toBe(retained)
+
+    // Real in-scope exclusions still correct the backend total; foreign rows do not.
+    act(() => {
+      $sessions.set([{ ...preview[0], pinned: true }, ...preview.slice(1), ...foreign])
+      $pinnedSessionIds.set([preview[0].id])
+    })
+    expect(screen.getByRole('button', { name: 'Show all 4 sessions' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Show all 5 sessions' })).toBeNull()
+    expect($sessions.get().filter(row => foreign.some(other => other.id === row.id))).toEqual(foreign)
+  })
+
+  it('re-homes concrete rows when the selected connection changes without dropping work', () => {
+    renderSidebar('/', 'chat')
+    act(() => $connection.set({ ...localConnection, mode: 'remote', connectionId: 'vps' }))
+    expect(screen.queryByText('Scoped local')).toBeNull()
+    expect(screen.queryAllByText('Scoped remote').length).toBeGreaterThan(0)
+    expect($sessions.get()).toEqual([local, remote])
+  })
+
+  it('renders unloaded work-profile search hits from the current connection only', async () => {
+    vi.useFakeTimers()
+    setApiRequestConnection('local')
+    $activeGatewayProfile.set('work')
+    $sessions.set([
+      { ...local, profile: 'work' },
+      { ...remote, profile: 'work' }
+    ])
+    vi.stubGlobal('hermesDesktop', {
+      api: vi.fn(async (request: { connectionId?: string; path: string }) => {
+        if (request.path === '/api/profiles') {
+          return { profiles: [] }
+        }
+
+        if (!request.path.startsWith('/api/sessions/search')) {
+          throw new Error(`Unexpected fixture request: ${request.path}`)
+        }
+
+        return {
+          results: [
+            {
+              session_id: `hit-${request.connectionId}`,
+              title: `Needle ${request.connectionId}`,
+              model: null,
+              role: null,
+              session_started: 1,
+              snippet: 'needle',
+              source: 'cli'
+            }
+          ]
+        }
+      })
+    })
+
+    try {
+      renderSidebar('/', 'chat')
+      fireEvent.change(screen.getByRole('textbox'), { target: { value: 'needle' } })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200)
+      })
+      expect(screen.queryAllByText('Needle local').length).toBeGreaterThan(0)
+      act(() => {
+        setApiRequestConnection('vps')
+        $connection.set({ ...localConnection, mode: 'remote', connectionId: 'vps' })
+      })
+      expect(screen.queryByText('Needle local')).toBeNull()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200)
+      })
+      expect(screen.queryAllByText('Needle vps').length).toBeGreaterThan(0)
+      expect(screen.queryByText('Needle local')).toBeNull()
+    } finally {
+      cleanup()
+      setApiRequestConnection(null)
+      $activeGatewayProfile.set('default')
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('restores retained remote rows when entering All profiles and hides them again on return', () => {
+    renderSidebar('/', 'chat')
+    expect(screen.queryByText('Scoped remote')).toBeNull()
+    act(() => setShowAllProfiles(true))
+    expect(screen.queryAllByText('Scoped remote').length).toBeGreaterThan(0)
+    act(() => setShowAllProfiles(false))
+    expect(screen.queryByText('Scoped remote')).toBeNull()
+    expect($sessions.get()).toEqual([local, remote])
   })
 })
 
