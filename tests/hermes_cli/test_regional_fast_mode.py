@@ -34,17 +34,18 @@ def test_official_openai_routes_keep_the_requested_tier(provider, base_url):
     ("gpt-5-codex", "openai-api", "https://us.api.openai.com/v1", None),
     ("claude-opus-5.5", "anthropic", "https://us.api.openai.com/v1", None),
     ("grok-4.6", "xai", "https://us.api.openai.com/v1", None),
-    ("claude-opus-5.5", "anthropic", "https://api.anthropic.com", {"speed": "fast"}),
+    ("claude-opus-5.5", "anthropic", "https://api.anthropic.com", None),
     ("claude-opus-5.5", "anthropic", "https://us.api.anthropic.com", None),
-    ("grok-4.6", "xai", "https://api.x.ai/v1", {"service_tier": "priority"}),
+    ("grok-4.6", "xai", "https://api.x.ai/v1", None),
     ("grok-4.6", "xai", "https://us.api.x.ai/v1", None),
-    ("gpt-6.1-sol", "openai-codex", "https://chatgpt.com/backend-api/codex", {"service_tier": "priority"}),
+    ("gpt-6.1-sol", "openai-codex", "https://chatgpt.com/backend-api/codex", {"service_tier": "ultrafast"}),
     ("gpt-6.1-sol", "openai-codex", "https://proxy.test/backend-api/codex", None),
-    ("gpt-6.1-sol", None, None, {"service_tier": "priority"}),
-    ("gpt-6.1-sol", "openai-api", None, {"service_tier": "priority"}),
+    ("gpt-6.1-sol", None, None, {"service_tier": "ultrafast"}),
+    ("gpt-6.1-sol", "openai-api", None, {"service_tier": "ultrafast"}),
 ])
 def test_fast_route_boundaries_are_preserved(model, provider, base_url, expected):
-    assert resolve_fast_mode_overrides(model, provider=provider, base_url=base_url) == expected
+    assert resolve_fast_mode_overrides(model, provider=provider, base_url=base_url) == {"service_tier": "priority"}
+    assert resolve_fast_mode_overrides(model, provider=provider, base_url=base_url, tier="ultrafast") == expected
 
 
 @pytest.mark.parametrize("model,host,tier", [
@@ -56,4 +57,5 @@ def test_fast_route_boundaries_are_preserved(model, provider, base_url, expected
     ("gpt-6-astra", "eu.api.openai.com", "ultrafast"),  # Astra Ultrafast: US + global only
 ])
 def test_regional_hosts_only_get_documented_fast_tiers(model, host, tier):
-    assert resolve_fast_mode_overrides(model, provider="openai-api", base_url=f"https://{host}/v1", tier=tier) is None
+    expected = None if tier == "ultrafast" else {"service_tier": "priority"}
+    assert resolve_fast_mode_overrides(model, provider="openai-api", base_url=f"https://{host}/v1", tier=tier) == expected

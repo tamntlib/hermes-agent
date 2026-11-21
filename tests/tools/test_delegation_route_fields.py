@@ -82,7 +82,7 @@ def test_route_tier_reaches_the_child_and_its_sibling_keeps_the_default():
 
 
 @pytest.mark.parametrize("route, needle", [
-    ({**LOCAL, "service_tier": "fast"}, "not available"),  # a local route has no fast tier: never a silent normal
+    ({**LOCAL, "service_tier": "ultrafast"}, "not available"),  # a local route has no fast tier: never a silent normal
     ({**CODEX, "service_tier": "turbo"}, "turbo"),
     ({**CODEX, "service_tier": "auto"}, "auto"),  # bounded windows are per user turn, meaningless for a child
 ])

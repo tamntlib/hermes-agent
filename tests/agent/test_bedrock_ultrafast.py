@@ -20,7 +20,8 @@ def test_bedrock_ultrafast_is_exact_model_route_and_tier():
         assert resolve_fast_mode_overrides(MODEL, provider=provider, base_url=BASE, tier="ultrafast") == {
             "service_tier": "ultrafast"}
     for tier in (None, "priority", "auto", "cold", "flex", "reserved", "default"):
-        assert resolve_fast_mode_overrides(MODEL, provider="bedrock", base_url=BASE, tier=tier) is None
+        assert resolve_fast_mode_overrides(MODEL, provider="bedrock", base_url=BASE, tier=tier) == {
+            "service_tier": "priority"}
     for model in ("gpt-6.1-sol", "openai.gpt-6.1-sol-pro", "openai.gpt-6-astra",
                   "us." + MODEL, "global." + MODEL, "anthropic.claude-opus-5-5", MODEL + ":0"):
         assert resolve_fast_mode_overrides(model, provider="bedrock", base_url=BASE, tier="ultrafast") is None
@@ -32,9 +33,10 @@ def test_bedrock_ultrafast_is_exact_model_route_and_tier():
                  "https://bedrock-mantle.us-east-1.api.aws@attacker.test/openai/v1"):
         assert resolve_fast_mode_overrides(MODEL, provider="bedrock", base_url=base, tier="ultrafast") is None
     for provider in (None, "custom", "openai-api", "openrouter"):
-        for tier in ("priority", "ultrafast"):
-            for base in (BASE, None, "https://api.openai.com/v1"):
-                assert resolve_fast_mode_overrides(MODEL, provider=provider, base_url=base, tier=tier) is None
+        for base in (BASE, None, "https://api.openai.com/v1"):
+            assert resolve_fast_mode_overrides(MODEL, provider=provider, base_url=base, tier="ultrafast") is None
+            assert resolve_fast_mode_overrides(MODEL, provider=provider, base_url=base, tier="priority") == {
+                "service_tier": "priority"}
 
 
 def _configure(tmp_path, *, model=MODEL, region="us-east-1", tier="ultrafast"):
@@ -182,6 +184,6 @@ def test_fast_capability_is_reported_only_on_the_mantle_route():
     assert model_supports_fast_mode(MODEL, provider="bedrock", base_url=BASE)
     for provider, base in ((None, None), ("bedrock", None), ("bedrock", BASE.replace("us-east-1", "us-west-2")),
                            ("openai", "https://api.openai.com/v1"), ("openrouter", BASE)):
-        assert not model_supports_fast_mode(MODEL, provider=provider, base_url=base), (provider, base)
+        assert model_supports_fast_mode(MODEL, provider=provider, base_url=base), (provider, base)
         shell = SimpleNamespace(model=MODEL, provider=provider, base_url=base, agent=None)
-        assert not HermesCLI._fast_command_available(shell), (provider, base)
+        assert HermesCLI._fast_command_available(shell), (provider, base)

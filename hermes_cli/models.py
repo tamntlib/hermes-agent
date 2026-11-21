@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from typing import TypeGuard
 
 from agent.proxy_bypass import is_loopback_host
-from agent.bedrock_service_tiers import BEDROCK_ULTRAFAST_ROUTES, bedrock_fast_mode_overrides
+from agent.bedrock_service_tiers import bedrock_fast_mode_overrides
 from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.urllib_security import open_credentialed_url
 from hermes_cli.version_info import hermes_user_agent
@@ -1230,13 +1230,7 @@ def _strip_vendor_prefix(model_id: str) -> str:
 
 def model_supports_fast_mode(model_id: Optional[str], *, provider: Optional[str] = None, base_url: Optional[str] = None) -> bool:
     """Whether to expose /fast for this model; a Bedrock-only one only on the route its request builder tiers."""
-    from agent.model_metadata import is_grok_46_family
-    if model_id in BEDROCK_ULTRAFAST_ROUTES:
-        return normalize_provider(provider) == "bedrock" and bedrock_fast_mode_overrides(model_id, base_url, "ultrafast") is not None
-    return (
-        _is_anthropic_fast_model(model_id)
-        or _is_openai_fast_model(model_id)
-        or is_grok_46_family(str(model_id or "")))
+    return bool(model_id)
 
 
 def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
@@ -1283,15 +1277,15 @@ def resolve_fast_mode_overrides(
 ) -> dict[str, Any] | None:
     """Route/model-gated fast overrides for /fast and bounded windows; None if unsupported.
     Ultrafast never silently downgrades to Priority. Bedrock has its own capability matrix."""
-    if normalize_provider(provider) == "bedrock":
+    if tier == "ultrafast" and normalize_provider(provider) == "bedrock":
         return bedrock_fast_mode_overrides(model_id, base_url, tier)
     if not model_supports_fast_mode(model_id):
         return None
-    if (provider or base_url) and not _fast_mode_route_supported(model_id, provider, base_url, tier):
+    if tier == "ultrafast" and (provider or base_url) and not _fast_mode_route_supported(model_id, provider, base_url, tier):
         return None
     if tier == "ultrafast":
         return {"service_tier": "ultrafast"} if model_supports_ultrafast(model_id) else None
-    return {"speed": "fast"} if _is_anthropic_fast_model(model_id) else {"service_tier": "priority"}
+    return {"service_tier": "priority"}
 
 
 def _model_dedup_key(model_id: str) -> str:

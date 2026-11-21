@@ -66,6 +66,8 @@ def apply_compression_service_tier(
         projection = resolve_fast_mode_overrides(
             model, provider=provider, base_url=base_url, tier=selected,
         ) or {}
+        if api_mode == "anthropic_messages" and projection.get("service_tier") == "priority":
+            projection = {"speed": "fast"}
         if ("speed" in projection) == (api_mode == "anthropic_messages"):
             body.update(projection)
     if body:

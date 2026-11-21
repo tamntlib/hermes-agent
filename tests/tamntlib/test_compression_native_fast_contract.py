@@ -60,7 +60,7 @@ def test_native_credential_retry_reprojects_destination(config, monkeypatch, asy
         extra_body={"keep": 7})
     assert first.requests[0]["extra_body"] == {"keep": 7, "service_tier": "priority"}
     assert retry.requests[0]["model"] == model
-    assert retry.requests[0]["extra_body"] == ({"keep": 7, "service_tier": "priority"} if destination == "same" else {"keep": 7})
+    assert retry.requests[0]["extra_body"] == {"keep": 7, "service_tier": "priority"}
 
 
 @pytest.mark.parametrize("async_mode", [False, True])
@@ -92,8 +92,8 @@ def test_native_primary_to_fallback_destination(config, monkeypatch, async_mode,
         messages=[{"role": "user", "content": "summarize"}], extra_body={"keep": 7})
     assert first.requests[0]["extra_body"] == {"keep": 7, "service_tier": "priority"}
     assert captured[0]["model"] == model
-    assert captured[0]["extra_body"] == ({"keep": 7, "speed": "fast"} if native else {"keep": 7})
-    assert ("fast-mode-2026-02-01" in captured[0].get("extra_headers", {}).get("anthropic-beta", "")) is native
+    assert captured[0]["extra_body"] == {"keep": 7, "speed": "fast"}
+    assert "fast-mode-2026-02-01" in captured[0].get("extra_headers", {}).get("anthropic-beta", "")
 
 
 @pytest.mark.parametrize("provider,url,model,tier,expected", [
@@ -101,9 +101,9 @@ def test_native_primary_to_fallback_destination(config, monkeypatch, async_mode,
     ("openai-codex", "https://chatgpt.com/backend-api/codex", "gpt-6-astra", "ultrafast", {"service_tier": "ultrafast"}),
     ("anthropic", "https://api.anthropic.com", "claude-opus-4-8", "priority", {"speed": "fast"}),
     ("anthropic", "https://api.anthropic.com", "claude-opus-4-8", "ultrafast", {}),
-    ("custom:paid", "https://relay.example/v1", "gpt-5.5", "priority", {}),
-    ("openai", "https://relay.example/v1", "gpt-5.5", "priority", {}),
-    ("openai", "https://api.openai.com/v1", "unsupported-model", "priority", {}),
+    ("custom:paid", "https://relay.example/v1", "gpt-5.5", "priority", {"service_tier": "priority"}),
+    ("openai", "https://relay.example/v1", "gpt-5.5", "priority", {"service_tier": "priority"}),
+    ("openai", "https://api.openai.com/v1", "unsupported-model", "priority", {"service_tier": "priority"}),
 ])
 def test_native_signature_and_destination_gate(provider, url, model, tier, expected):
     original = {"model": model, "extra_body": {"keep": 7, "speed": "fast", "service_tier": "priority"}}
@@ -129,7 +129,6 @@ def test_native_anthropic_beta_requires_compression_projection(monkeypatch, task
             content=[SimpleNamespace(type="text", text="summary")], stop_reason="end_turn", usage=None))
     client = aux.AnthropicAuxiliaryClient(SimpleNamespace(), "claude-opus-4-8", "test-only",
                                          "https://api.anthropic.com")
-    expected = expected and provider == "anthropic"
     token = aux._RELAY_AUX_CALL_CONTEXT.set({"task": task, "provider": provider})
     try:
         client.chat.completions.create(model="claude-opus-4-8", messages=[],
